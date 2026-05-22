@@ -21,11 +21,15 @@
 
   let pc;
   try {
-    // No iceServers: LAN-only deployment. Browser will gather host
-    // candidates, which is all we need to reach the scrcpy host on the same
-    // Wi-Fi. Configuring a public STUN here would just add a DNS lookup and
-    // a round-trip for no benefit.
-    pc = new RTCPeerConnection();
+    // We're a LAN-only deployment, so the host's own IP is reachable
+    // without STUN — but iOS Safari has been observed to either skip ICE
+    // gathering entirely or emit only mDNS (.local) host candidates that
+    // libdatachannel on the desktop can't resolve. Giving the browser a
+    // public STUN URL forces it to also gather a server-reflexive
+    // candidate, which makes the connection negotiate reliably.
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
     log("pc created");
   } catch (e) {
     setStatus("RTCPeerConnection failed: " + e.message, false);

@@ -20,8 +20,10 @@ encoder — no re-encoding on the host.
   universally supports H.264; `--video-codec=h265|av1` would silently fail in
   most viewers, so scrcpy refuses to enable web share in that case and just
   prints a warning.
-- All viewers must be on the same LAN as the desktop host. No STUN/TURN/relay
-  servers are used — ICE will only gather host candidates.
+- All viewers must be on the same LAN as the desktop host. The scrcpy host
+  configures no STUN/TURN/relay servers; the browser-side viewer references
+  a public STUN URL only to coax iOS Safari into emitting non-mDNS ICE
+  candidates — no media or signaling traffic ever leaves the LAN.
 - This is video-only and view-only. Audio and remote control from the browser
   are out of scope for the initial version. Each new viewer does cause one
   RESET_VIDEO control message to be sent to the device (to request a fresh
