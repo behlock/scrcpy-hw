@@ -78,6 +78,10 @@ const struct scrcpy_options scrcpy_options_default = {
 #ifdef HAVE_USB
     .otg = false,
 #endif
+#ifdef HAVE_WEBSHARE
+    .web_share = false,
+    .web_share_port = 8000,
+#endif
     .show_touches = false,
     .fullscreen = false,
     .always_on_top = false,

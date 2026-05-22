@@ -45,6 +45,9 @@
 #ifdef HAVE_V4L2
 # include "v4l2_sink.h"
 #endif
+#ifdef HAVE_WEBSHARE
+# include "webshare/web_share.h"
+#endif
 
 struct scrcpy {
     struct sc_server server;
@@ -59,6 +62,9 @@ struct scrcpy {
 #ifdef HAVE_V4L2
     struct sc_v4l2_sink v4l2_sink;
     struct sc_delay_buffer v4l2_buffer;
+#endif
+#ifdef HAVE_WEBSHARE
+    struct sc_web_share web_share;
 #endif
     struct sc_controller controller;
     struct sc_file_pusher file_pusher;
@@ -328,6 +334,10 @@ scrcpy(struct scrcpy_options *options) {
 #ifdef HAVE_V4L2
     bool v4l2_sink_initialized = false;
 #endif
+#ifdef HAVE_WEBSHARE
+    bool web_share_initialized = false;
+    bool web_share_started = false;
+#endif
     bool video_demuxer_started = false;
     bool audio_demuxer_started = false;
 #ifdef HAVE_USB
@@ -563,6 +573,28 @@ scrcpy(struct scrcpy_options *options) {
         }
     }
 
+#ifdef HAVE_WEBSHARE
+    if (options->web_share) {
+        if (options->video_codec != SC_CODEC_H264) {
+            LOGW("Web share requires --video-codec=h264 (the default). "
+                 "Web share is disabled for this run.");
+        } else if (!options->video) {
+            LOGW("Web share requires video. Web share is disabled.");
+        } else {
+            if (!sc_web_share_init(&s->web_share, options->web_share_port)) {
+                goto end;
+            }
+            web_share_initialized = true;
+            if (!sc_web_share_start(&s->web_share)) {
+                goto end;
+            }
+            web_share_started = true;
+            sc_packet_source_add_sink(&s->video_demuxer.packet_source,
+                                      &s->web_share.packet_sink);
+        }
+    }
+#endif
+
     struct sc_controller *controller = NULL;
     struct sc_key_processor *kp = NULL;
     struct sc_mouse_processor *mp = NULL;
@@ -580,6 +612,12 @@ scrcpy(struct scrcpy_options *options) {
         controller_initialized = true;
 
         controller = &s->controller;
+
+#ifdef HAVE_WEBSHARE
+        if (web_share_initialized) {
+            sc_web_share_set_controller(&s->web_share, &s->controller);
+        }
+#endif
 
 #ifdef HAVE_USB
         bool use_keyboard_aoa =
@@ -910,6 +948,11 @@ end:
     if (recorder_initialized) {
         sc_recorder_stop(&s->recorder);
     }
+#ifdef HAVE_WEBSHARE
+    if (web_share_started) {
+        sc_web_share_stop(&s->web_share);
+    }
+#endif
     if (screen_initialized) {
         sc_screen_interrupt(&s->screen);
     }
@@ -997,6 +1040,12 @@ end:
     if (recorder_initialized) {
         sc_recorder_destroy(&s->recorder);
     }
+
+#ifdef HAVE_WEBSHARE
+    if (web_share_initialized) {
+        sc_web_share_destroy(&s->web_share);
+    }
+#endif
 
     if (file_pusher_initialized) {
         sc_file_pusher_join(&s->file_pusher);

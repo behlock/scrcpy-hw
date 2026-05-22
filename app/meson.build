@@ -106,6 +106,29 @@ if v4l2_support
     src += [ 'src/v4l2_sink.c' ]
 endif
 
+webshare_support = get_option('webshare')
+if webshare_support
+    src += [
+        'src/webshare/h264_rtp.c',
+        'src/webshare/http_server.c',
+        'src/webshare/qr_render.c',
+        'src/webshare/qrcodegen.c',
+        'src/webshare/web_share.c',
+        'src/webshare/webrtc_peer.c',
+    ]
+    # Invoke via `python3 <script>` so a missing executable bit on a fresh
+    # checkout (or Windows, which ignores +x) doesn't break the build.
+    embed_py = find_program('python3')
+    webshare_assets = custom_target(
+        'webshare_static.c',
+        input: ['src/webshare/static/index.html', 'src/webshare/static/app.js'],
+        output: 'webshare_static.c',
+        command: [embed_py, files('src/webshare/embed_static.py'),
+                  '@OUTPUT@', '@INPUT0@', '@INPUT1@'],
+    )
+    src += webshare_assets
+endif
+
 usb_support = get_option('usb')
 if usb_support
     src += [
@@ -138,9 +161,17 @@ if usb_support
     dependencies += dependency('libusb-1.0', static: static)
 endif
 
+if webshare_support
+    dependencies += dependency('LibDataChannel', static: static)
+endif
+
 if host_machine.system() == 'windows'
     dependencies += cc.find_library('mingw32')
     dependencies += cc.find_library('ws2_32')
+    if webshare_support
+        # GetAdaptersAddresses() used by util/net.c's interface enumerator.
+        dependencies += cc.find_library('iphlpapi')
+    endif
 endif
 
 check_functions = [
@@ -185,6 +216,9 @@ conf.set('HAVE_V4L2', v4l2_support)
 
 # enable HID over AOA support (linux only)
 conf.set('HAVE_USB', usb_support)
+
+# enable web share (WebRTC broadcast via QR code)
+conf.set('HAVE_WEBSHARE', webshare_support)
 
 configure_file(configuration: conf, output: 'config.h')
 

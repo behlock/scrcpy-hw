@@ -109,6 +109,7 @@ enum {
     OPT_KEEP_ACTIVE,
     OPT_BACKGROUND_COLOR,
     OPT_RENDER_FIT,
+    OPT_WEB_SHARE,
 };
 
 struct sc_option {
@@ -1004,6 +1005,19 @@ static const struct sc_option options[] = {
         .longopt = "stay-awake",
         .text = "Keep the device on while scrcpy is running, when the device "
                 "is plugged in.",
+    },
+    {
+        .longopt_id = OPT_WEB_SHARE,
+        .longopt = "web-share",
+        .argdesc = "port",
+        .optional_arg = true,
+        .text = "Start an HTTP/WebRTC server on the given TCP port (default "
+                "8000) so other devices on the local network can scan a QR "
+                "code with their phone and watch the mirror in their browser "
+                "live.\n"
+                "Requires --video-codec=h264 (the default).\n"
+                "View-only, video-only, no audio. The QR code (and connect "
+                "URL) is printed to the terminal at startup.",
     },
     {
         .longopt_id = OPT_WINDOW_BORDERLESS,
@@ -2758,6 +2772,18 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
 #else
                 LOGE("V4L2 (--v4l2-sink) is disabled (or unsupported on this "
                      "platform).");
+                return false;
+#endif
+            case OPT_WEB_SHARE:
+#ifdef HAVE_WEBSHARE
+                opts->web_share = true;
+                if (optarg && !parse_port(optarg, &opts->web_share_port)) {
+                    return false;
+                }
+                break;
+#else
+                LOGE("Web share (--web-share) was not compiled in. "
+                     "Rebuild with -Dwebshare=true.");
                 return false;
 #endif
             case OPT_V4L2_BUFFER:

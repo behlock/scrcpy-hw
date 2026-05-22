@@ -295,6 +295,10 @@ struct scrcpy_options {
 #ifdef HAVE_USB
     bool otg;
 #endif
+#ifdef HAVE_WEBSHARE
+    bool web_share;
+    uint16_t web_share_port;
+#endif
     bool show_touches;
     bool fullscreen;
     bool always_on_top;

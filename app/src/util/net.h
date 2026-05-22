@@ -93,4 +93,21 @@ net_set_tcp_nodelay(sc_socket socket, bool tcp_nodelay);
 bool
 net_parse_ipv4(const char *ip, uint32_t *ipv4);
 
+#ifdef HAVE_WEBSHARE
+/**
+ * Find the local IPv4 address LAN peers can use to reach this host (host byte
+ * order). Returns false if no usable interface is found.
+ */
+bool
+net_get_local_ipv4(uint32_t *ipv4);
+
+/**
+ * Set a per-socket receive timeout in milliseconds. After this, blocking
+ * net_recv* calls will return -1 if no data arrives within the window.
+ * Pass 0 to disable.
+ */
+bool
+net_set_recv_timeout(sc_socket socket, unsigned timeout_ms);
+#endif
+
 #endif

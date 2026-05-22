@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>scrcpy mirror</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      overscroll-behavior: none;
+    }
+    #stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      width: 100%;
+    }
+    #v {
+      max-width: 100%;
+      max-height: 100%;
+      background: #000;
+    }
+    #status {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      padding: 6px 10px;
+      background: rgba(0, 0, 0, 0.6);
+      border-radius: 6px;
+      font-size: 13px;
+      transition: opacity 0.5s;
+    }
+    #status.connected { opacity: 0; }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <video id="v" autoplay playsinline muted
+           webkit-playsinline="true"
+           disablePictureInPicture
+           disableRemotePlayback></video>
+  </div>
+  <div id="status">Connecting…</div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -295,3 +295,164 @@ net_parse_ipv4(const char *s, uint32_t *ipv4) {
     *ipv4 = ntohl(addr.s_addr);
     return true;
 }
+
+#ifdef HAVE_WEBSHARE
+bool
+net_set_recv_timeout(sc_socket socket, unsigned timeout_ms) {
+    sc_raw_socket raw_sock = unwrap(socket);
+#ifdef _WIN32
+    DWORD value = timeout_ms;
+    int ret = setsockopt(raw_sock, SOL_SOCKET, SO_RCVTIMEO,
+                         (const char *) &value, sizeof(value));
+#else
+    struct timeval tv = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    int ret = setsockopt(raw_sock, SOL_SOCKET, SO_RCVTIMEO,
+                         (const void *) &tv, sizeof(tv));
+#endif
+    if (ret == -1) {
+        net_perror("setsockopt(SO_RCVTIMEO)");
+        return false;
+    }
+    return true;
+}
+
+static bool
+get_local_ipv4_via_udp_connect(uint32_t *ipv4) {
+#ifdef _WIN32
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) {
+        return false;
+    }
+#else
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        return false;
+    }
+#endif
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(80);
+    // 1.1.1.1 (Cloudflare DNS): reachable from any default route, no DNS
+    // lookup needed. The address isn't contacted; only the kernel's choice of
+    // source IP matters.
+    dst.sin_addr.s_addr = htonl(0x01010101);
+
+    bool ok = false;
+    if (connect(sock, (struct sockaddr *) &dst, sizeof(dst)) == 0) {
+        struct sockaddr_in local;
+        socklen_t len = sizeof(local);
+        if (getsockname(sock, (struct sockaddr *) &local, &len) == 0
+                && local.sin_family == AF_INET
+                && local.sin_addr.s_addr != 0
+                && local.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+            *ipv4 = ntohl(local.sin_addr.s_addr);
+            ok = true;
+        }
+    }
+
+#ifdef _WIN32
+    closesocket(sock);
+#else
+    close(sock);
+#endif
+    return ok;
+}
+
+#ifdef _WIN32
+# include <iphlpapi.h>
+
+static bool
+get_local_ipv4_via_enum(uint32_t *ipv4) {
+    ULONG buflen = 15000;
+    IP_ADAPTER_ADDRESSES *adapters = malloc(buflen);
+    if (!adapters) {
+        return false;
+    }
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST
+                | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG rc = GetAdaptersAddresses(AF_INET, flags, NULL, adapters, &buflen);
+    if (rc != NO_ERROR) {
+        free(adapters);
+        return false;
+    }
+
+    bool found = false;
+    for (IP_ADAPTER_ADDRESSES *a = adapters; a && !found; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) {
+            continue;
+        }
+        if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) {
+            continue;
+        }
+        for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress;
+                u; u = u->Next) {
+            if (u->Address.lpSockaddr->sa_family != AF_INET) {
+                continue;
+            }
+            struct sockaddr_in *sin =
+                (struct sockaddr_in *) u->Address.lpSockaddr;
+            *ipv4 = ntohl(sin->sin_addr.s_addr);
+            found = true;
+            break;
+        }
+    }
+
+    free(adapters);
+    return found;
+}
+
+#else // POSIX
+# include <ifaddrs.h>
+# include <net/if.h>
+
+static bool
+get_local_ipv4_via_enum(uint32_t *ipv4) {
+    struct ifaddrs *ifaddr;
+    if (getifaddrs(&ifaddr) == -1) {
+        return false;
+    }
+
+    bool found = false;
+    for (struct ifaddrs *ifa = ifaddr; ifa && !found; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) {
+            continue;
+        }
+        if (ifa->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        if (!(ifa->ifa_flags & IFF_UP)) {
+            continue;
+        }
+        if (ifa->ifa_flags & IFF_LOOPBACK) {
+            continue;
+        }
+
+        struct sockaddr_in *sin = (struct sockaddr_in *) ifa->ifa_addr;
+        *ipv4 = ntohl(sin->sin_addr.s_addr);
+        found = true;
+    }
+
+    freeifaddrs(ifaddr);
+    return found;
+}
+
+#endif
+
+bool
+net_get_local_ipv4(uint32_t *ipv4) {
+    // Prefer the kernel-chosen default-route source IP. This avoids picking a
+    // virtual/Docker/VPN interface that LAN peers can't reach.
+    if (get_local_ipv4_via_udp_connect(ipv4)) {
+        return true;
+    }
+    // Fallback: enumerate interfaces (e.g. offline host with no default route
+    // but a working LAN bridge).
+    return get_local_ipv4_via_enum(ipv4);
+}
+#endif // HAVE_WEBSHARE
