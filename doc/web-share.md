@@ -81,3 +81,22 @@ each ≈ 40 Mbps uplink from the desktop.
 - Android Chrome (any current version)
 - Desktop Chrome / Firefox / Safari with WebRTC + H.264 (i.e. any current
   build)
+
+## Tuning for lower latency
+
+Steady-state glass-to-glass latency on a clean LAN is typically ~150–400 ms.
+A few extra knobs:
+
+- `--video-bit-rate=4M` (or `--video-bit-rate=6M`) — lower than the 8 Mbps
+  default cuts encoder queueing and shrinks each AU, often shaving
+  50–100 ms. Affects the local scrcpy window too.
+- `--max-fps=60` (default) — ensure you're not implicitly throttled by an
+  older device's encoder. If frames are dropping, fall back to `--max-fps=30`.
+- 5 GHz Wi-Fi for the host **and** the viewer. 2.4 GHz can add 50+ ms of
+  jitter on a busy channel.
+- Wire the desktop host to the router with Ethernet when possible.
+
+The browser-side viewer pins `playoutDelayHint=0` and `jitterBufferTarget=0`
+on every receiver after each renegotiation, declines iOS Safari's native
+fullscreen player (which would re-introduce buffering), and aggressively
+catches the `<video>` playback head back to the live edge every 250 ms.

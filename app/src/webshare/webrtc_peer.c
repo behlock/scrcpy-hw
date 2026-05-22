@@ -259,7 +259,11 @@ sc_webrtc_peer_set_remote_description(struct sc_webrtc_peer *peer,
         };
         rtcSetH264Packetizer(track_id, &pinit);
         rtcChainRtcpSrReporter(track_id);
-        rtcChainRtcpNackResponder(track_id, 512);
+        // Small NACK responder window on a LAN: losses are rare, and a
+        // shorter replay buffer means a loss either repairs almost instantly
+        // or triggers a quick keyframe request, instead of dragging the
+        // receiver several hundred ms behind while we replay stale RTP.
+        rtcChainRtcpNackResponder(track_id, 64);
 
         // Publish the track id last, with release ordering, so the demuxer
         // thread sees a fully-configured track when it observes a non-zero
