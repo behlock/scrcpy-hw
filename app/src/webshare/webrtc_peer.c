@@ -233,9 +233,14 @@ sc_webrtc_peer_set_remote_description(struct sc_webrtc_peer *peer,
             .name = "scrcpy",
             .msid = "scrcpy",
             .trackId = "scrcpy-video",
-            // Constrained Baseline 5.2 — the level must be >= the actual
-            // stream's level or strict HW decoders refuse the AU.
-            .profile = "42e034",
+            // Constrained Baseline 3.1. iOS Safari refuses to negotiate an
+            // answer whose profile-level-id exceeds the level it offered
+            // (typically 3.1) — declaring a higher level here (e.g. 5.2) made
+            // the iPhone hang in "Negotiating…" while Mac Safari accepted it.
+            // 3.1 is the lowest-common-denominator level every modern browser
+            // offers; lower-than-actual stream level is tolerated by current
+            // VideoToolbox / Chromium decoders in practice.
+            .profile = "42e01f",
         };
         int track_id = rtcAddTrackEx(peer->pc, &track_init);
         if (track_id <= 0) {
