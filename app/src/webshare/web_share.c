@@ -86,35 +86,104 @@ json_unescape(const char *s, size_t len) {
     return out;
 }
 
-// Find string field `key` in a flat JSON object. Returns malloc'd value or NULL.
-static char *
-json_get_string(const char *json, const char *key) {
-    size_t klen = strlen(key);
-    const char *p = json;
-    while ((p = strstr(p, "\""))) {
-        // Try to match "<key>":
-        if (strncmp(p + 1, key, klen) == 0 && p[1 + klen] == '"') {
-            const char *colon = p + 2 + klen;
-            while (*colon == ' ' || *colon == '\t' || *colon == ':' || *colon == '\n') {
-                if (*colon == ':') { ++colon; break; }
-                ++colon;
-            }
-            while (*colon == ' ' || *colon == '\t' || *colon == '\n') ++colon;
-            if (*colon != '"') return NULL;
-            ++colon;
-            // Find unescaped closing quote
-            const char *end = colon;
-            while (*end) {
-                if (*end == '\\' && end[1]) { end += 2; continue; }
-                if (*end == '"') break;
-                ++end;
-            }
-            if (*end != '"') return NULL;
-            return json_unescape(colon, (size_t)(end - colon));
-        }
+// Skip ASCII whitespace.
+static const char *
+json_skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+    return p;
+}
+
+// `p` points at an opening '"'. Returns the address just past the closing
+// quote, with [*start, *end) spanning the string content (still escaped).
+// Returns NULL if the string is unterminated.
+static const char *
+json_scan_string(const char *p, const char **start, const char **end) {
+    if (*p != '"') return NULL;
+    *start = ++p;
+    while (*p) {
+        if (*p == '\\' && p[1]) { p += 2; continue; }
+        if (*p == '"') { *end = p; return p + 1; }
         ++p;
     }
     return NULL;
+}
+
+// Skip over an arbitrary JSON value starting at `p`. Returns address just
+// past the value, or NULL on malformed input. Tracks `"` inside nested
+// strings so that braces / brackets inside string values don't confuse depth
+// tracking.
+static const char *
+json_skip_value(const char *p) {
+    p = json_skip_ws(p);
+    if (*p == '"') {
+        const char *s, *e;
+        return json_scan_string(p, &s, &e);
+    }
+    if (*p == '{' || *p == '[') {
+        char open = *p;
+        char close = (open == '{') ? '}' : ']';
+        int depth = 1;
+        ++p;
+        while (*p && depth > 0) {
+            if (*p == '"') {
+                const char *s, *e;
+                const char *next = json_scan_string(p, &s, &e);
+                if (!next) return NULL;
+                p = next;
+                continue;
+            }
+            if (*p == open) ++depth;
+            else if (*p == close) --depth;
+            ++p;
+        }
+        return (depth == 0) ? p : NULL;
+    }
+    // Number / true / false / null: consume until the value terminator.
+    while (*p && *p != ',' && *p != '}' && *p != ']'
+           && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+        ++p;
+    }
+    return p;
+}
+
+// Look up a top-level string field by key in a flat JSON object. Returns the
+// malloc'd unescaped value, or NULL if the key is absent or the value isn't a
+// string. Anchored to true key positions (after `{` or `,`), so a literal
+// "type": substring appearing inside another field's *value* cannot spoof a
+// match (which would otherwise let a crafted SDP inject signaling content).
+static char *
+json_get_string(const char *json, const char *key) {
+    if (!json) return NULL;
+    size_t klen = strlen(key);
+    const char *p = json_skip_ws(json);
+    if (*p != '{') return NULL;
+    ++p;
+    for (;;) {
+        p = json_skip_ws(p);
+        if (*p == '}' || *p == '\0') return NULL;
+        if (*p != '"') return NULL;
+        const char *kstart, *kend;
+        const char *next = json_scan_string(p, &kstart, &kend);
+        if (!next) return NULL;
+        p = json_skip_ws(next);
+        if (*p != ':') return NULL;
+        ++p;
+        p = json_skip_ws(p);
+        bool match = ((size_t)(kend - kstart) == klen)
+                  && memcmp(kstart, key, klen) == 0;
+        if (match) {
+            if (*p != '"') return NULL;
+            const char *vstart, *vend;
+            const char *after = json_scan_string(p, &vstart, &vend);
+            if (!after) return NULL;
+            return json_unescape(vstart, (size_t)(vend - vstart));
+        }
+        const char *after = json_skip_value(p);
+        if (!after) return NULL;
+        p = json_skip_ws(after);
+        if (*p == ',') { ++p; continue; }
+        return NULL;
+    }
 }
 
 // JSON-escape a string into `out` (cap bytes incl. NUL). Returns length or -1.
@@ -513,15 +582,6 @@ sc_web_share_start(struct sc_web_share *ws) {
              ws->local_ipv4 & 0xFF,
              (unsigned) ws->port);
 
-    struct sc_qr qr;
-    if (sc_qr_encode(&qr, ws->connect_url)) {
-        fprintf(stderr,
-                "\nWeb share: scan this QR with a phone on the same Wi-Fi "
-                "to watch the mirror in a browser.\nURL: %s\n\n",
-                ws->connect_url);
-        sc_qr_print(&qr, stderr);
-    }
-
     static const struct sc_http_server_callbacks HTTP_CBS = {
         .on_ws_open = on_ws_open,
         .on_ws_message = on_ws_message,
@@ -534,6 +594,18 @@ sc_web_share_start(struct sc_web_share *ws) {
         return false;
     }
     ws->started = true;
+
+    // Print the QR and URL only after the listener is actually bound, so the
+    // user never sees a connect URL pointing at a port that failed to open.
+    struct sc_qr qr;
+    if (sc_qr_encode(&qr, ws->connect_url)) {
+        fprintf(stderr,
+                "\nWeb share: scan this QR with a phone on the same Wi-Fi "
+                "to watch the mirror in a browser.\nURL: %s\n\n",
+                ws->connect_url);
+        sc_qr_print(&qr, stderr);
+    }
+
     LOGI("Web share: listening on %s", ws->connect_url);
     return true;
 }

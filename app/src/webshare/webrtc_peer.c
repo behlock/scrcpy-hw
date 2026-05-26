@@ -45,10 +45,12 @@ rtc_log_cb(rtcLogLevel level, const char *message) {
 
 static void
 init_logger_once(void) {
-    static bool inited = false;
-    if (!inited) {
+    // Multiple WebSocket conn threads can race to create their first peer.
+    // atomic_flag_test_and_set guarantees exactly one thread initializes
+    // libdatachannel's logger (and avoids C11 data-race UB on a plain bool).
+    static atomic_flag inited = ATOMIC_FLAG_INIT;
+    if (!atomic_flag_test_and_set(&inited)) {
         rtcInitLogger(RTC_LOG_WARNING, rtc_log_cb);
-        inited = true;
     }
 }
 

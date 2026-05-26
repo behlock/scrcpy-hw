@@ -211,8 +211,18 @@ net_recv(sc_socket socket, void *buf, size_t len) {
 
 ssize_t
 net_recv_all(sc_socket socket, void *buf, size_t len) {
-    sc_raw_socket raw_sock = unwrap(socket);
-    return recv(raw_sock, buf, len, MSG_WAITALL);
+    // Explicit loop (rather than MSG_WAITALL) because Winsock's MSG_WAITALL
+    // semantics on TCP are not reliable for partial reads, and SO_RCVTIMEO
+    // can cause MSG_WAITALL to return short on POSIX too.
+    size_t copied = 0;
+    while (copied < len) {
+        ssize_t r = net_recv(socket, (char *) buf + copied, len - copied);
+        if (r <= 0) {
+            return copied ? (ssize_t) copied : r;
+        }
+        copied += (size_t) r;
+    }
+    return (ssize_t) copied;
 }
 
 ssize_t

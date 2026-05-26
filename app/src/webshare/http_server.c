@@ -1,6 +1,7 @@
 #include "http_server.h"
 
 #include <assert.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,7 @@
 #include "compat.h"
 #include "util/log.h"
 #include "util/memory.h"
+#include "util/tick.h"
 
 #define MAX_REQUEST_LINE      8192
 #define MAX_HEADER_TOTAL      8192
@@ -16,11 +18,19 @@
 // Cap how long a single HTTP request can sit half-read before we drop the
 // connection. This bounds slow / stuck peers without affecting healthy WebRTC
 // signaling (the request itself is tiny and arrives in a few packets).
-#define HTTP_REQUEST_RECV_TIMEOUT_MS  10000
+#define HTTP_REQUEST_RECV_TIMEOUT_MS   5000
+// Total wall-clock budget for completing the HTTP request (headers + upgrade
+// response). Bounds slow-loris-style attacks where the peer dribbles bytes
+// just fast enough to keep SO_RCVTIMEO from firing.
+#define HTTP_REQUEST_TOTAL_TIMEOUT_MS  10000
+// Maximum simultaneous live connections. Above this we send 503 and close so a
+// hostile LAN peer can't exhaust threads / memory.
+#define MAX_CONNECTIONS                64
 
 // One per accepted TCP connection. Promoted to a real "WebSocket connection"
 // once the Upgrade succeeds. Either way, the thread runs to completion and is
-// joined on server shutdown.
+// joined either by the listener's reaper sweep (normal exit) or in
+// sc_http_server_destroy (shutdown).
 struct sc_ws_conn {
     struct sc_http_server *owner;
     sc_socket socket;
@@ -29,6 +39,9 @@ struct sc_ws_conn {
     bool send_mutex_inited;
     bool is_ws;  // set once the Upgrade handshake succeeds
     bool open;   // true while the WS read loop is running
+    // Set by conn_thread just before it returns; observed by the listener so
+    // it can join + free the slot and accept another connection in its place.
+    atomic_bool done;
 };
 
 // ---- minimal SHA-1 (RFC 3174) ----------------------------------------------
@@ -159,10 +172,14 @@ send_all(sc_socket sock, const void *buf, size_t len) {
 }
 
 static ssize_t
-recv_line(sc_socket sock, char *buf, size_t cap) {
+recv_line(sc_socket sock, char *buf, size_t cap, sc_tick deadline) {
     // Read one CRLF-terminated line, byte-by-byte (signaling traffic is tiny).
+    // The per-recv SO_RCVTIMEO bounds idle stalls; `deadline` bounds the total
+    // request wall-clock time so a slow-loris peer can't drip-feed bytes for
+    // hours.
     size_t n = 0;
     while (n + 1 < cap) {
+        if (sc_tick_now() >= deadline) return -1;
         char c;
         ssize_t r = net_recv(sock, &c, 1);
         if (r != 1) return -1;
@@ -289,6 +306,10 @@ ws_recv_text_frame(sc_socket sock, char **out_text, size_t *out_len) {
         bool fin = h[0] & 0x80;
         uint8_t opcode = h[0] & 0x0F;
         bool masked = h[1] & 0x80;
+        // RFC 6455 §5.1: a server MUST drop the connection on any unmasked
+        // frame from a client. Real browsers always mask; an unmasked frame
+        // means the peer is misbehaving (or a hand-crafted raw socket).
+        if (!masked) return -1;
         uint64_t plen = h[1] & 0x7F;
         if (plen == 126) {
             uint8_t e[2];
@@ -301,23 +322,21 @@ ws_recv_text_frame(sc_socket sock, char **out_text, size_t *out_len) {
             for (int i = 0; i < 8; ++i) plen = (plen << 8) | e[i];
         }
         if (plen > WS_FRAME_MAX_PAYLOAD) return -1;
-        uint8_t mask[4] = {0};
-        if (masked) {
-            if (!ws_recv_exact(sock, mask, 4)) return -1;
-        }
-        uint8_t *payload = NULL;
+        uint8_t mask[4];
+        if (!ws_recv_exact(sock, mask, 4)) return -1;
+        // Always allocate so callers receive a non-NULL NUL-terminated buffer
+        // even for zero-length frames (downstream JSON parsing dereferences
+        // unconditionally).
+        uint8_t *payload = malloc((size_t) plen + 1);
+        if (!payload) return -1;
         if (plen) {
-            payload = malloc((size_t) plen + 1);
-            if (!payload) return -1;
             if (!ws_recv_exact(sock, payload, (size_t) plen)) {
                 free(payload);
                 return -1;
             }
-            if (masked) {
-                for (size_t i = 0; i < plen; ++i) payload[i] ^= mask[i & 3];
-            }
-            payload[plen] = '\0';
+            for (size_t i = 0; i < plen; ++i) payload[i] ^= mask[i & 3];
         }
+        payload[plen] = '\0';
 
         if (opcode == 0x8) {  // close
             free(payload);
@@ -366,12 +385,12 @@ ws_run_loop(struct sc_ws_conn *conn) {
 }
 
 static void
-handle_request(struct sc_ws_conn *conn) {
+handle_request(struct sc_ws_conn *conn, sc_tick deadline) {
     struct sc_http_server *server = conn->owner;
     sc_socket sock = conn->socket;
 
     char line[MAX_REQUEST_LINE];
-    if (recv_line(sock, line, sizeof(line)) < 0) return;
+    if (recv_line(sock, line, sizeof(line), deadline) < 0) return;
 
     // Parse request line: "METHOD PATH VERSION"
     char *sp1 = strchr(line, ' ');
@@ -387,7 +406,7 @@ handle_request(struct sc_ws_conn *conn) {
     size_t total = 0;
     while (hc < 32) {
         char hline[512];
-        ssize_t r = recv_line(sock, hline, sizeof(hline));
+        ssize_t r = recv_line(sock, hline, sizeof(hline), deadline);
         if (r < 0) return;
         if (r == 0) break;  // end of headers
         total += (size_t) r;
@@ -421,9 +440,14 @@ handle_request(struct sc_ws_conn *conn) {
             serve_404(sock);
             return;
         }
+        // RFC 6455 §4.1: Sec-WebSocket-Key is a base64-encoded 16-byte nonce,
+        // which is always exactly 24 characters. Reject anything else
+        // explicitly — otherwise an oversized header would silently fail the
+        // snprintf-size check below and leave the client hanging.
+        if (strlen(key) != 24) { serve_404(sock); return; }
         char src[256];
         int n = snprintf(src, sizeof(src), "%s%s", key, WS_GUID);
-        if (n < 0 || n >= (int) sizeof(src)) return;
+        if (n < 0 || n >= (int) sizeof(src)) { serve_404(sock); return; }
         uint8_t digest[20];
         struct sha1 sh;
         sha1_init(&sh);
@@ -461,9 +485,47 @@ conn_thread(void *arg) {
     // WebSocket upgrade succeeds, since signaling messages may legitimately
     // arrive minutes apart.
     net_set_recv_timeout(conn->socket, HTTP_REQUEST_RECV_TIMEOUT_MS);
-    handle_request(conn);
+    sc_tick deadline = sc_tick_now()
+                     + SC_TICK_FROM_MS(HTTP_REQUEST_TOTAL_TIMEOUT_MS);
+    handle_request(conn, deadline);
     net_close(conn->socket);
+    // Publish "done" last, with release ordering, so the listener observes a
+    // fully-finished thread/state when it sweeps and joins.
+    atomic_store_explicit(&conn->done, true, memory_order_release);
     return 0;
+}
+
+// Reap conn slots whose worker thread has signaled done. Must be called with
+// s->conns_mutex held. Joins (cheap: the thread is exiting), tears down the
+// per-conn state and compacts the array in place.
+static void
+reap_done_conns_locked(struct sc_http_server *s) {
+    size_t i = 0;
+    while (i < s->conns_count) {
+        struct sc_ws_conn *c = s->conns[i];
+        if (atomic_load_explicit(&c->done, memory_order_acquire)) {
+            sc_thread_join(&c->thread, NULL);
+            if (c->send_mutex_inited) {
+                sc_mutex_destroy(&c->send_mutex);
+            }
+            free(c);
+            s->conns[i] = s->conns[--s->conns_count];
+            continue;
+        }
+        ++i;
+    }
+}
+
+// Best-effort: send a 503 + close on a client we refused to enqueue. The
+// recipient is a misbehaving / hostile peer so we don't care about delivery.
+static void
+reject_overflow(sc_socket sock) {
+    const char *resp =
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n";
+    net_send_all(sock, resp, strlen(resp));
+    net_close(sock);
 }
 
 static int
@@ -481,6 +543,7 @@ listener_thread(void *arg) {
         }
         conn->owner = s;
         conn->socket = client;
+        atomic_init(&conn->done, false);
         if (!sc_mutex_init(&conn->send_mutex)) {
             net_close(client);
             free(conn);
@@ -489,6 +552,19 @@ listener_thread(void *arg) {
         conn->send_mutex_inited = true;
 
         sc_mutex_lock(&s->conns_mutex);
+        // Reclaim any slots whose worker has finished. Without this the array
+        // would grow monotonically and we'd hit MAX_CONNECTIONS forever after
+        // a churn of short-lived clients.
+        reap_done_conns_locked(s);
+        if (s->conns_count >= MAX_CONNECTIONS) {
+            sc_mutex_unlock(&s->conns_mutex);
+            LOGW("Web share: connection limit (%d) reached, rejecting client",
+                 MAX_CONNECTIONS);
+            sc_mutex_destroy(&conn->send_mutex);
+            free(conn);
+            reject_overflow(client);
+            continue;
+        }
         if (s->conns_count == s->conns_capacity) {
             size_t newcap = s->conns_capacity ? s->conns_capacity * 2 : 8;
             struct sc_ws_conn **r =
