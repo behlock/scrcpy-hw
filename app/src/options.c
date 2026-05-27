@@ -82,6 +82,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .web_share = false,
     .web_share_port = 8000,
 #endif
+    .glyph = false,
     .show_touches = false,
     .fullscreen = false,
     .always_on_top = false,

@@ -48,6 +48,7 @@
 #ifdef HAVE_WEBSHARE
 # include "webshare/web_share.h"
 #endif
+#include "glyph_sidecar.h"
 
 struct scrcpy {
     struct sc_server server;
@@ -338,6 +339,7 @@ scrcpy(struct scrcpy_options *options) {
     bool web_share_initialized = false;
     bool web_share_started = false;
 #endif
+    bool glyph_sidecar_spawned = false;
     bool video_demuxer_started = false;
     bool audio_demuxer_started = false;
 #ifdef HAVE_USB
@@ -594,6 +596,11 @@ scrcpy(struct scrcpy_options *options) {
         }
     }
 #endif
+
+    if (options->glyph) {
+        // Non-essential: if the sidecar can't start we keep scrcpy running.
+        glyph_sidecar_spawned = sc_glyph_sidecar_spawn(options->serial);
+    }
 
     struct sc_controller *controller = NULL;
     struct sc_key_processor *kp = NULL;
@@ -953,6 +960,9 @@ end:
         sc_web_share_stop(&s->web_share);
     }
 #endif
+    if (glyph_sidecar_spawned) {
+        sc_glyph_sidecar_stop();
+    }
     if (screen_initialized) {
         sc_screen_interrupt(&s->screen);
     }

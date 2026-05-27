@@ -299,6 +299,7 @@ struct scrcpy_options {
     bool web_share;
     uint16_t web_share_port;
 #endif
+    bool glyph;
     bool show_touches;
     bool fullscreen;
     bool always_on_top;

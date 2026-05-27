@@ -20,6 +20,9 @@ then
     exit 1
 fi
 
+SCRCPY_REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 SCRCPY_ICON_DIR="app/data" \
 SCRCPY_SERVER_PATH="$BUILDDIR/server/scrcpy-server" \
+SCRCPY_GLYPH_SIDECAR="$SCRCPY_REPO_DIR/glyph-sidecar/glyph_sidecar.py" \
 "$BUILDDIR/app/scrcpy" "$@"

@@ -110,6 +110,7 @@ enum {
     OPT_BACKGROUND_COLOR,
     OPT_RENDER_FIT,
     OPT_WEB_SHARE,
+    OPT_GLYPH,
 };
 
 struct sc_option {
@@ -1018,6 +1019,18 @@ static const struct sc_option options[] = {
                 "Requires --video-codec=h264 (the default).\n"
                 "View-only, video-only, no audio. The QR code (and connect "
                 "URL) is printed to the terminal at startup.",
+    },
+    {
+        .longopt_id = OPT_GLYPH,
+        .longopt = "glyph",
+        .text = "Open a second window on the host that mirrors the live "
+                "state of the back-glyph LEDs of supported Nothing phones "
+                "(currently Phone (2) and Phone (4a) Pro).\n"
+                "Spawns a Python sidecar that tails `adb logcat` for the "
+                "system NtGlyphServiceImpl frames, then serves a small "
+                "localhost HTML page in a chromeless browser window. Does "
+                "not affect the front mirror or --web-share, which continue "
+                "to show only the front screen.",
     },
     {
         .longopt_id = OPT_WINDOW_BORDERLESS,
@@ -2786,6 +2799,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                      "Rebuild with -Dwebshare=true.");
                 return false;
 #endif
+            case OPT_GLYPH:
+                opts->glyph = true;
+                break;
             case OPT_V4L2_BUFFER:
 #ifdef HAVE_V4L2
                 if (!parse_buffering_time(optarg, &opts->v4l2_buffer)) {
