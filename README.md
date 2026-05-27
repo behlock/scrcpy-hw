@@ -6,16 +6,6 @@ Personal fork of [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) that 
 
 Everything else from upstream still works exactly the same. The fork is opt-in at build time (`-Dwebshare=true`) and behind a single CLI flag (`--web-share`), so a build without it is byte-equivalent to upstream behaviour.
 
-## Fork additions
-
-| Commit | What |
-| --- | --- |
-| `f070ae1` | Initial `--web-share` implementation: embedded HTTP server, WebRTC signalling over WebSocket, H.264 RTP packetiser, terminal QR code, single-page viewer. |
-| `fc0c725` | iOS Safari support — H.264 profile-id negotiation in the SDP offer. |
-| `c88ef1b` | Harden Safari viewer — `playoutDelayHint=0`, `jitterBufferTarget=0`, decline native fullscreen player, catch the `<video>` head back to the live edge every 250 ms. |
-| `90ec805` | Reliability pass — fix viewer disconnect races, harden the HTTP server against malformed requests, tighten socket cleanup in `net.c` to avoid fd leaks on long-running sessions. |
-| `e133c45` | Mobile Safari latency tweak — narrow the RTP pacing window on the peer side, shaves ~50 ms of glass-to-glass on iPhone. |
-
 Full design notes: [`doc/web-share.md`](doc/web-share.md).
 
 ## Usage
@@ -60,21 +50,3 @@ ninja -C x
 ```
 
 Built without `-Dwebshare=true`, the binary is identical to upstream scrcpy.
-
-## Upstream docs
-
-For everything that isn't the web share feature, the upstream documentation applies as-is:
-
-- [Connection](doc/connection.md) · [Video](doc/video.md) · [Audio](doc/audio.md) · [Control](doc/control.md)
-- [Keyboard](doc/keyboard.md) · [Mouse](doc/mouse.md) · [Gamepad](doc/gamepad.md)
-- [Device](doc/device.md) · [Window](doc/window.md) · [Recording](doc/recording.md)
-- [Virtual display](doc/virtual-display.md) · [Camera](doc/camera.md) · [V4L2](doc/v4l2.md)
-- [Tunnels](doc/tunnels.md) · [OTG](doc/otg.md) · [Shortcuts](doc/shortcuts.md)
-- [Build instructions](doc/build.md) · [FAQ](FAQ.md)
-
-## License
-
-Apache 2.0 — same as upstream.
-
-    Copyright (C) 2018 Genymobile
-    Copyright (C) 2018-2026 Romain Vimont
