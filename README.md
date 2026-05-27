@@ -1,237 +1,80 @@
-**This GitHub repo (<https://github.com/Genymobile/scrcpy>) is the only official
-source for the project. Do not download releases from random websites, even if
-their name contains `scrcpy`.**
+# scrcpy-hw
 
-# scrcpy (v4.0)
+<img src="app/data/scrcpy.svg" width="96" height="96" alt="scrcpy" align="right" />
 
-<img src="app/data/scrcpy.svg" width="128" height="128" alt="scrcpy" align="right" />
+Personal fork of [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) that adds **browser-based mirroring** over WebRTC — a phone on the same Wi-Fi scans a QR code and watches the live device mirror in any modern browser. No app to install on the viewer, no relay server, no re-encoding.
 
-_pronounced "**scr**een **c**o**py**"_
+Everything else from upstream still works exactly the same. The fork is opt-in at build time (`-Dwebshare=true`) and behind a single CLI flag (`--web-share`), so a build without it is byte-equivalent to upstream behaviour.
 
-This application mirrors Android devices (video and audio) connected via USB or
-[TCP/IP](doc/connection.md#tcpip-wireless) and allows control using the
-computer's keyboard and mouse. It does not require _root_ access or an app
-installed on the device. It works on _Linux_, _Windows_, and _macOS_.
+## Fork additions
 
-[![Linux](https://img.shields.io/badge/Linux-download-orange?style=for-the-badge&logo=linux)](doc/linux.md)&nbsp;
-[![Windows](https://img.shields.io/badge/Windows-download-blue?style=for-the-badge&logo=windows)](doc/windows.md)&nbsp;
-[![macOS](https://img.shields.io/badge/macOS-download-brightgreen?style=for-the-badge&logo=apple)](doc/macos.md)&nbsp;
+| Commit | What |
+| --- | --- |
+| `f070ae1` | Initial `--web-share` implementation: embedded HTTP server, WebRTC signalling over WebSocket, H.264 RTP packetiser, terminal QR code, single-page viewer. |
+| `fc0c725` | iOS Safari support — H.264 profile-id negotiation in the SDP offer. |
+| `c88ef1b` | Harden Safari viewer — `playoutDelayHint=0`, `jitterBufferTarget=0`, decline native fullscreen player, catch the `<video>` head back to the live edge every 250 ms. |
+| `90ec805` | Reliability pass — fix viewer disconnect races, harden the HTTP server against malformed requests, tighten socket cleanup in `net.c` to avoid fd leaks on long-running sessions. |
+| `e133c45` | Mobile Safari latency tweak — narrow the RTP pacing window on the peer side, shaves ~50 ms of glass-to-glass on iPhone. |
 
-![screenshot](assets/screenshot-debian-600.jpg)
+Full design notes: [`doc/web-share.md`](doc/web-share.md).
 
-It focuses on:
+## Usage
 
- - **lightness**: native, displays only the device screen
- - **performance**: 30~120fps, depending on the device
- - **quality**: 1920×1080 or above
- - **low latency**: [35~70ms][lowlatency]
- - **low startup time**: ~1 second to display the first image
- - **non-intrusiveness**: nothing is left installed on the Android device
- - **user benefits**: no account, no ads, no internet required
- - **freedom**: free and open source software
-
-[lowlatency]: https://github.com/Genymobile/scrcpy/pull/646
-
-Its features include:
- - [audio forwarding](doc/audio.md) (Android 11+)
- - [recording](doc/recording.md)
- - [virtual display](doc/virtual-display.md)
- - mirroring with [Android device screen off](doc/device.md#turn-screen-off)
- - [copy-paste](doc/control.md#copy-paste) in both directions
- - [configurable quality](doc/video.md)
- - [camera mirroring](doc/camera.md) (Android 12+)
- - [mirroring as a webcam (V4L2)](doc/v4l2.md) (Linux-only)
- - physical [keyboard][hid-keyboard] and [mouse][hid-mouse] simulation (HID)
- - [gamepad](doc/gamepad.md) support
- - [OTG mode](doc/otg.md)
- - and more…
-
-[hid-keyboard]: doc/keyboard.md#physical-keyboard-simulation
-[hid-mouse]: doc/mouse.md#physical-mouse-simulation
-
-## Prerequisites
-
-The Android device requires at least API 21 (Android 5.0).
-
-[Audio forwarding](doc/audio.md) is supported for API >= 30 (Android 11+).
-
-Make sure you [enabled USB debugging][enable-adb] on your device(s).
-
-[enable-adb]: https://developer.android.com/studio/debug/dev-options#enable
-
-On some devices (especially Xiaomi), you might get the following error:
-
-```
-Injecting input events requires the caller (or the source of the instrumentation, if any) to have the INJECT_EVENTS permission.
+```bash
+scrcpy --web-share              # default port 8000
+scrcpy --web-share=9000         # override port
 ```
 
-In that case, you need to enable [an additional option][control] `USB debugging
-(Security Settings)` (this is an item different from `USB debugging`) to control
-it using a keyboard and mouse. Rebooting the device is necessary once this
-option is set.
+The terminal prints a QR code and a connect URL. Scan from any phone on the same LAN — the page is a single static viewer that negotiates its own WebRTC PeerConnection per viewer. The QR is the access control; there is no auth.
 
-[control]: https://github.com/Genymobile/scrcpy/issues/70#issuecomment-373286323
+```
+device (H.264) ── ADB ──► video_demuxer ──► [decoder, recorder, web_share]
+                                                                 │
+                                                      Annex-B → AVCC
+                                                                 │
+                                 libdatachannel ──► RTP/SRTP ──► browser
+```
 
-Note that USB debugging is not required to run scrcpy in [OTG mode](doc/otg.md).
+The video packet is passed through unchanged from the device encoder — no re-encoding on the host, so per-viewer CPU cost is near zero and quality matches the local scrcpy window. Bandwidth scales linearly per viewer (5 viewers × 8 Mbps ≈ 40 Mbps uplink).
 
+### Constraints
 
-## Get the app
+- **H.264 only.** Mobile-browser WebRTC universally supports H.264; `--video-codec=h265|av1` would silently fail in most viewers, so the host refuses to enable web share in that case and prints a warning.
+- **LAN only.** No STUN/TURN/relay is configured on the host. The browser-side viewer references a public STUN URL only to coax iOS Safari into emitting non-mDNS ICE candidates — no media or signalling ever leaves the LAN.
+- **Video-only, view-only.** Audio and remote control from the browser are out of scope. Each new viewer triggers one `RESET_VIDEO` to the device so the browser gets a fresh keyframe instead of waiting seconds for the next natural IDR.
 
- - [Linux](doc/linux.md)
- - [Windows](doc/windows.md) (read [how to run](doc/windows.md#run))
- - [macOS](doc/macos.md)
+### Browser support
 
+iOS Safari 14+, Android Chrome (current), desktop Chrome / Firefox / Safari (current). Tested most thoroughly on iPhone Safari, where ~150–300 ms steady-state latency is typical on a clean 5 GHz LAN.
 
-## Must-know tips
+## Build
 
- - [Reducing resolution](doc/video.md#size) may greatly improve performance
-   (`scrcpy -m1024`)
- - [_Right-click_](doc/mouse.md#mouse-bindings) triggers `BACK`
- - [_Middle-click_](doc/mouse.md#mouse-bindings) triggers `HOME`
- - <kbd>Alt</kbd>+<kbd>f</kbd> toggles [fullscreen](doc/window.md#fullscreen)
- - There are many other [shortcuts](doc/shortcuts.md)
+Web share is opt-in and depends on [libdatachannel](https://github.com/paullouisageneau/libdatachannel) (MPL 2.0, ~500 KB). The QR encoder is [Project Nayuki's qrcodegen-c](https://github.com/nayuki/QR-Code-generator) (MIT), vendored under `app/src/webshare/qrcodegen.{c,h}`.
 
+```bash
+brew install libdatachannel              # macOS
+sudo apt install libdatachannel-dev      # Debian / Ubuntu
 
-## Usage examples
+meson setup x -Dwebshare=true
+ninja -C x
+```
 
-There are a lot of options, [documented](#user-documentation) in separate pages.
-Here are just some common examples.
+Built without `-Dwebshare=true`, the binary is identical to upstream scrcpy.
 
- - Capture the screen in H.265 (better quality), limit the size to 1920, limit
-   the frame rate to 60fps, disable audio, and control the device by simulating
-   a physical keyboard:
+## Upstream docs
 
-    ```bash
-    scrcpy --video-codec=h265 --max-size=1920 --max-fps=60 --no-audio --keyboard=uhid
-    scrcpy --video-codec=h265 -m1920 --max-fps=60 --no-audio -K  # short version
-    ```
+For everything that isn't the web share feature, the upstream documentation applies as-is:
 
- - Start VLC in a new virtual display (separate from the device display):
-
-    ```bash
-    scrcpy --new-display=1920x1080 --start-app=org.videolan.vlc
-    ```
-
- - Start VLC in a new _flex_ display using H.265 with a bitrate of 16 Mbps,
-   while keeping the display active so it does not turn off:
-
-    ```bash
-    scrcpy --new-display -x --keep-active --start-app=org.videolan.vlc --video-codec=h265 -b16M
-    ```
-
- - Record the device camera in H.265 at 1920x1080 (and microphone) to an MP4
-   file:
-
-    ```bash
-    scrcpy --video-source=camera --video-codec=h265 --camera-size=1920x1080 --record=file.mp4
-    ```
-
- - Capture the device front camera and expose it as a webcam on the computer (on
-   Linux):
-
-    ```bash
-    scrcpy --video-source=camera --camera-size=1920x1080 --camera-facing=front --v4l2-sink=/dev/video2 --no-playback
-    ```
-
- - Control the device without mirroring by simulating a physical keyboard and
-   mouse (USB debugging not required):
-
-    ```bash
-    scrcpy --otg
-    ```
-
- - Control the device using gamepads plugged into the computer:
-
-    ```bash
-    scrcpy --gamepad=uhid
-    scrcpy -G  # short version
-    ```
-
-## User documentation
-
-The application provides a lot of features and configuration options. They are
-documented in the following pages:
-
- - [Connection](doc/connection.md)
- - [Video](doc/video.md)
- - [Audio](doc/audio.md)
- - [Control](doc/control.md)
- - [Keyboard](doc/keyboard.md)
- - [Mouse](doc/mouse.md)
- - [Gamepad](doc/gamepad.md)
- - [Device](doc/device.md)
- - [Window](doc/window.md)
- - [Recording](doc/recording.md)
- - [Virtual display](doc/virtual-display.md)
- - [Tunnels](doc/tunnels.md)
- - [OTG](doc/otg.md)
- - [Camera](doc/camera.md)
- - [Video4Linux](doc/v4l2.md)
- - [Shortcuts](doc/shortcuts.md)
-
-
-## Resources
-
- - [FAQ](FAQ.md)
- - [Translations][wiki] (not necessarily up to date)
- - [Build instructions](doc/build.md)
- - [Developers](doc/develop.md)
- - [Verify release signatures](doc/verify-release.md)
-
-[wiki]: https://github.com/Genymobile/scrcpy/wiki
-
-
-## Articles
-
-- [Introducing scrcpy][article-intro]
-- [Scrcpy now works wirelessly][article-tcpip]
-- [Scrcpy 2.0, with audio][article-scrcpy2]
-
-[article-intro]: https://blog.rom1v.com/2018/03/introducing-scrcpy/
-[article-tcpip]: https://www.genymotion.com/blog/open-source-project-scrcpy-now-works-wirelessly/
-[article-scrcpy2]: https://blog.rom1v.com/2023/03/scrcpy-2-0-with-audio/
-
-## Contact
-
-You can open an [issue] for bug reports, feature requests or general questions.
-
-For bug reports, please read the [FAQ](FAQ.md) first, you might find a solution
-to your problem immediately.
-
-[issue]: https://github.com/Genymobile/scrcpy/issues
-
-You can also use:
-
- - Reddit: [`r/scrcpy`](https://www.reddit.com/r/scrcpy)
- - BlueSky: [`@scrcpy.bsky.social`](https://bsky.app/profile/scrcpy.bsky.social)
- - Twitter: [`@scrcpy_app`](https://twitter.com/scrcpy_app)
-
-
-## Donate
-
-I'm [@rom1v](https://github.com/rom1v), the author and maintainer of _scrcpy_.
-
-If you appreciate this application, you can [support my open source
-work][donate]:
- - [GitHub Sponsors](https://github.com/sponsors/rom1v)
- - [Liberapay](https://liberapay.com/rom1v/)
- - [PayPal](https://paypal.me/rom2v)
-
-[donate]: https://blog.rom1v.com/about/#support-my-open-source-work
+- [Connection](doc/connection.md) · [Video](doc/video.md) · [Audio](doc/audio.md) · [Control](doc/control.md)
+- [Keyboard](doc/keyboard.md) · [Mouse](doc/mouse.md) · [Gamepad](doc/gamepad.md)
+- [Device](doc/device.md) · [Window](doc/window.md) · [Recording](doc/recording.md)
+- [Virtual display](doc/virtual-display.md) · [Camera](doc/camera.md) · [V4L2](doc/v4l2.md)
+- [Tunnels](doc/tunnels.md) · [OTG](doc/otg.md) · [Shortcuts](doc/shortcuts.md)
+- [Build instructions](doc/build.md) · [FAQ](FAQ.md)
 
 ## License
 
+Apache 2.0 — same as upstream.
+
     Copyright (C) 2018 Genymobile
     Copyright (C) 2018-2026 Romain Vimont
-
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
-
-        http://www.apache.org/licenses/LICENSE-2.0
-
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
