@@ -149,10 +149,10 @@ THEME_JS = """
 
 def _tag_phone2_paths(raw: str) -> str:
     """Add `class="z" data-zone="<idx>"` to each glyph path inside the SVG's
-    masked group. Same path structure used by both Phone (2) theme variants."""
+    top-level `<g>`. Same path structure used by both Phone (2) theme variants."""
     if not raw:
         return raw
-    m = re.search(r'<g mask="url\(#mask0_[^"]+\)">', raw)
+    m = re.search(r'<g[^>]*>', raw)
     if not m:
         return raw
     start = m.end()
@@ -186,34 +186,24 @@ def render_html_phone2() -> str:
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Phone (2) Glyphs</title>
 <style>
-  :root {{ color-scheme: light dark; }}
+  :root {{ color-scheme: dark; }}
   html, body {{ margin: 0; padding: 0;
     font-family: -apple-system, system-ui, sans-serif;
     height: 100%; overflow: hidden;
-    background: #0c0c0c; color: #ddd; }}
-  /* Auto: follow the system when no manual override is set. */
-  @media (prefers-color-scheme: light) {{
-    :root:not([data-theme]), :root:not([data-theme]) body {{
-      background: #f4f4f4; color: #1a1a1a;
-    }}
-  }}
+    background: #000; color: #ddd; }}
   /* Manual overrides (always win). */
   :root[data-theme="light"], :root[data-theme="light"] body {{
     background: #f4f4f4; color: #1a1a1a;
   }}
   :root[data-theme="dark"], :root[data-theme="dark"] body {{
-    background: #0c0c0c; color: #ddd;
+    background: #000; color: #ddd;
   }}
   .stage {{ width: 100vw; height: calc(100vh - 32px); padding: 16px 0;
     position: relative; }}
   .variant {{ width: 100%; height: 100%; }}
   .variant svg {{ width: 100%; height: 100%; display: block; overflow: visible; }}
-  /* Default = dark mode appearance. */
+  /* Default = dark mode appearance regardless of system. */
   #variant-light {{ display: none; }}
-  @media (prefers-color-scheme: light) {{
-    :root:not([data-theme]) #variant-dark  {{ display: none; }}
-    :root:not([data-theme]) #variant-light {{ display: block; }}
-  }}
   :root[data-theme="light"] #variant-dark  {{ display: none; }}
   :root[data-theme="light"] #variant-light {{ display: block; }}
   :root[data-theme="dark"] #variant-light {{ display: none; }}
@@ -257,23 +247,26 @@ def render_html_phone2() -> str:
   const byZoneLight = byZone('#variant-light');
 
   function styleForDark(v) {{
-    const vg = Math.sqrt(Math.min(1, v * 1.6));
+    const vg = Math.pow(Math.min(1, v * 2.2), 0.4);
     if (vg <= 0.02) return {{ fill: '#262626', filter: '' }};
-    const lvl = Math.round(120 + vg * 135);
+    const lvl = Math.round(200 + vg * 55);
     return {{
       fill: `rgb(${{lvl}},${{lvl}},${{lvl}})`,
-      filter: `drop-shadow(0 0 ${{3 + vg * 8}}px rgba(255,255,255,${{0.45 + vg * 0.45}}))`,
+      filter: `drop-shadow(0 0 ${{4 + vg * 10}}px rgba(255,255,255,${{0.7 + vg * 0.3}})) `
+            + `drop-shadow(0 0 ${{12 + vg * 22}}px rgba(255,255,255,${{0.45 + vg * 0.4}})) `
+            + `drop-shadow(0 0 ${{28 + vg * 40}}px rgba(255,255,255,${{0.25 + vg * 0.35}}))`,
     }};
   }}
   function styleForLight(v) {{
     // In light mode the glyphs are white/light by default (matches the
     // physical LEDs being off-invisible against the phone body). When lit
     // we keep them white but add a soft dark halo for visible depth.
-    const vg = Math.sqrt(Math.min(1, v * 1.6));
+    const vg = Math.pow(Math.min(1, v * 2.2), 0.4);
     if (vg <= 0.02) return {{ fill: '#d8d8d8', filter: '' }};
     return {{
       fill: '#ffffff',
-      filter: `drop-shadow(0 0 ${{2 + vg * 6}}px rgba(0,0,0,${{0.35 + vg * 0.3}}))`,
+      filter: `drop-shadow(0 0 ${{3 + vg * 8}}px rgba(0,0,0,${{0.45 + vg * 0.3}})) `
+            + `drop-shadow(0 0 ${{10 + vg * 18}}px rgba(0,0,0,${{0.25 + vg * 0.3}}))`,
     }};
   }}
 
@@ -338,32 +331,23 @@ def render_html_phone4apro() -> str:
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Phone (4a) Pro Glyphs</title>
 <style>
-  :root {{ color-scheme: light dark; }}
+  :root {{ color-scheme: dark; }}
   html, body {{ margin: 0; padding: 0;
     font-family: -apple-system, system-ui, sans-serif;
     height: 100%; overflow: hidden;
-    background: #0c0c0c; color: #ddd; }}
-  @media (prefers-color-scheme: light) {{
-    :root:not([data-theme]), :root:not([data-theme]) body {{
-      background: #f4f4f4; color: #1a1a1a;
-    }}
-  }}
+    background: #000; color: #ddd; }}
   :root[data-theme="light"], :root[data-theme="light"] body {{
     background: #f4f4f4; color: #1a1a1a;
   }}
   :root[data-theme="dark"], :root[data-theme="dark"] body {{
-    background: #0c0c0c; color: #ddd;
+    background: #000; color: #ddd;
   }}
   .stage {{ position: relative; width: 100vw;
     height: calc(100vh - 32px); padding: 16px 0; }}
   .variant {{ width: 100%; height: 100%; }}
   .variant svg {{ width: 100%; height: 100%; display: block; overflow: visible; }}
-  /* Default = dark mode appearance. */
+  /* Default = dark mode appearance regardless of system. */
   #variant-light {{ display: none; }}
-  @media (prefers-color-scheme: light) {{
-    :root:not([data-theme]) #variant-dark  {{ display: none; }}
-    :root:not([data-theme]) #variant-light {{ display: block; }}
-  }}
   :root[data-theme="light"] #variant-dark  {{ display: none; }}
   :root[data-theme="light"] #variant-light {{ display: block; }}
   :root[data-theme="dark"]  #variant-light {{ display: none; }}
