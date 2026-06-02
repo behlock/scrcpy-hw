@@ -56,6 +56,48 @@ sends to the glyphs (notifications, audio-reactive apps, the Nothing
 assistant, custom apps you build, etc.). No companion app is installed on
 the phone.
 
+## Catching fast patterns (≈60 Hz)
+
+Glyph Composer ringtones drive the LEDs at ~60 frames/sec, with nearly every
+frame changing brightness (a 16s clip can be ~1000 distinct frames, ~95% of
+them differing from the one before). `adb logcat` delivers that rate fine —
+the bottleneck used to be downstream, so the mirror visibly *smeared* fast
+modulation. The pipeline is built to track it 1:1:
+
+- **Coalesce, never backlog.** Each SSE client holds only the *newest* frame
+  (`Subscriber`). A browser that briefly lags skips intermediate frames and
+  snaps to the current LED state instead of replaying a stale queue — and it
+  can never back-pressure the logcat reader.
+- **Render in the SSE handler, not on rAF.** The browser paints each frame as
+  it arrives over SSE. We deliberately do *not* drive rendering from
+  `requestAnimationFrame`: a glyph window sitting next to (or behind) the
+  scrcpy mirror is unfocused/occluded, and browsers throttle or fully pause
+  rAF for hidden windows — which froze the mirror. The SSE `onmessage`
+  callback keeps firing regardless of window focus.
+- **No CSS transition.** A `transition` on `fill`/`filter` would low-pass
+  the 60 Hz signal into mush *and* re-rasterize the glow blur every frame it
+  is mid-transition. Removed — changes are applied instantly.
+- **Only the visible variant, only moved zones.** Each frame touches just the
+  active theme variant (the other is `display:none`) and skips any zone whose
+  quantised brightness is unchanged, so a heavy 137-dot Phone (4a) Pro frame
+  stays inside the 16 ms budget.
+
+## Phone (1)-format (5-zone) compositions
+
+Some ringtones — including Glyph Composer tracks authored for Phone (1) — play
+on a Phone (2) as a simplified **5-channel glyph-group** frame:
+`setLightFrame[..] frameColors[5] [...]` instead of the per-segment
+`frameColors[33]`. The reader used to accept only the native size and silently
+dropped these, so such ringtones lit the *phone* but never the *mirror* (a
+native 33-zone composition like a Phone (2) track worked fine — hence the
+"this one shows, that one doesn't" asymmetry).
+
+The reader now also accepts the 5-channel frame and expands it onto the 33
+render zones via `PHONE2_GROUP_ZONES` (group → zone indices, from the Glyph
+Developer Kit Phone (2) table). Channel order is the Glyph Composer A..E order;
+if a glyph group lights in the wrong place, reorder that list. `_make_log_reader`
+takes a `{size: expander}` map, so other sizes/models can be added the same way.
+
 ## Building and running
 
 ```
@@ -72,13 +114,19 @@ To silence scrcpy's audio-buffer debug noise, add `--verbosity=info`:
 
 ## UI
 
-- **Theme**: defaults to the system's color-scheme preference. Triple-click
-  the bottom-right 80x80px corner of the window to cycle
-  *auto -> dark -> light -> auto*. Choice persists across reloads
-  (`localStorage`).
+- **Theme**: defaults to a dark appearance (glowing white glyphs on black —
+  the natural look for LEDs) regardless of the host's system color scheme.
+  Triple-click the bottom-right 80x80px corner of the window to cycle
+  *auto -> dark -> light -> auto* (auto == dark). Choice persists across
+  reloads (`localStorage`). Note: the renderer must agree on the visible
+  variant in auto mode — the CSS shows the dark-bodied phone, so the JS
+  paints the dark variant too; following the system here would paint the
+  hidden light variant on a light-mode host and leave the glyphs unlit.
 - **Resize**: the SVG scales to the window, preserving aspect ratio.
-- **Close**: closing the scrcpy window also tears down the sidecar (SIGTERM)
-  and the Chrome app-mode window's profile dir.
+- **Close**: closing the scrcpy window tears down the sidecar (SIGTERM), and
+  the sidecar in turn closes its app-mode browser window and removes its
+  throwaway `/tmp/glyph-mirror-*` profile dir. Stale profiles from a hard
+  kill are reaped on the next launch.
 
 ## Files
 

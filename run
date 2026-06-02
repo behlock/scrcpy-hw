@@ -14,15 +14,22 @@ fi
 BUILDDIR="$1"
 shift
 
+SCRCPY_REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve a relative BUILDDIR against the repo dir, so this script works when
+# invoked from any current working directory (e.g. via a global wrapper).
+if [[ "$BUILDDIR" != /* ]]
+then
+    BUILDDIR="$SCRCPY_REPO_DIR/$BUILDDIR"
+fi
+
 if [[ ! -d "$BUILDDIR" ]]
 then
     echo "The build dir \"$BUILDDIR\" does not exist." >&2
     exit 1
 fi
 
-SCRCPY_REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-SCRCPY_ICON_DIR="app/data" \
+SCRCPY_ICON_DIR="$SCRCPY_REPO_DIR/app/data" \
 SCRCPY_SERVER_PATH="$BUILDDIR/server/scrcpy-server" \
 SCRCPY_GLYPH_SIDECAR="$SCRCPY_REPO_DIR/glyph-sidecar/glyph_sidecar.py" \
 "$BUILDDIR/app/scrcpy" "$@"

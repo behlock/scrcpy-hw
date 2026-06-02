@@ -58,6 +58,7 @@ enum {
     OPT_NO_POWER_ON,
     OPT_VIDEO_CODEC,
     OPT_NO_AUDIO,
+    OPT_AUDIO,
     OPT_AUDIO_BIT_RATE,
     OPT_AUDIO_CODEC,
     OPT_AUDIO_CODEC_OPTIONS,
@@ -608,6 +609,11 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_NO_AUDIO,
         .longopt = "no-audio",
         .text = "Disable audio forwarding.",
+    },
+    {
+        .longopt_id = OPT_AUDIO,
+        .longopt = "audio",
+        .text = "Enable audio forwarding (disabled by default in this build).",
     },
     {
         .longopt_id = OPT_NO_AUDIO_PLAYBACK,
@@ -2750,6 +2756,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_NO_AUDIO:
                 opts->audio = false;
+                break;
+            case OPT_AUDIO:
+                opts->audio = true;
                 break;
             case OPT_NO_CLEANUP:
                 opts->cleanup = false;

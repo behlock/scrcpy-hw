@@ -21,16 +21,18 @@ etc.) by passively reading the system log.
 from __future__ import annotations
 
 import argparse
+import glob
 import http.server
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from queue import Empty, Queue
 from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +49,39 @@ GLYPH_LOGCAT_LINE_RE = re.compile(
 PHONE2_FRAME_SIZE = 33
 PHONE4APRO_FRAME_SIZE = 137
 ZONE_COUNT = PHONE2_FRAME_SIZE  # back-compat for code that still uses it
+
+# Compositions authored for Phone (1) — including Glyph Composer ringtones —
+# are played back as a simplified 5-channel "glyph group" frame
+# (`setLightFrame[..] frameColors[5] [...]`) instead of the per-segment
+# `frameColors[33]`. Each channel drives one whole Phone (2) glyph group. The
+# native reader filtered to size 33 and silently dropped these, so such
+# ringtones lit the phone but never the mirror. We expand a 5-channel frame
+# onto the 33 render zones so it mirrors like the native path.
+#
+# Group → Phone (2) zone indices are from the Glyph Developer Kit "Nothing
+# Phone (2)" table: A (camera) = 0,1 · B (diagonal) = 2 · C (circle) = 3..23 ·
+# E (bottom dot) = 24 · D (USB line) = 25..32. Channel order is the Glyph
+# Composer A..E order. If a glyph group lights in the wrong place, reorder this
+# list (same spirit as the PATH_TO_ZONE caveat above).
+PHONE2_GROUP_ZONES = [
+    [0, 1],                  # ch0 = A  (camera)
+    [2],                     # ch1 = B  (diagonal accent)
+    list(range(3, 24)),      # ch2 = C  (the big circle: C1_1..C1_16, C2..C6)
+    list(range(25, 33)),     # ch3 = D  (USB line: D1_1..D1_8)
+    [24],                    # ch4 = E  (bottom-centre dot)
+]
+PHONE2_GROUP_FRAME_SIZE = len(PHONE2_GROUP_ZONES)  # 5
+
+
+def _expand_phone2_groups(vals: list[int]) -> list[int]:
+    """Map a 5-channel glyph-group frame onto a 33-zone Phone (2) frame by
+    copying each channel's value to every zone in that group."""
+    out = [0] * PHONE2_FRAME_SIZE
+    for ch, zones in enumerate(PHONE2_GROUP_ZONES):
+        v = vals[ch]
+        for z in zones:
+            out[z] = v
+    return out
 
 
 # ---------- Phone (2) renderer (uses vendored SVG of the back of the phone) ----
@@ -208,11 +243,13 @@ def render_html_phone2() -> str:
   :root[data-theme="light"] #variant-light {{ display: block; }}
   :root[data-theme="dark"] #variant-light {{ display: none; }}
   :root[data-theme="dark"] #variant-dark  {{ display: block; }}
-  /* Default (off) — dim shade; JS replaces fill+filter when zone is on. */
-  #variant-dark  svg path.z {{ fill: #262626;
-    transition: fill 30ms linear, filter 30ms linear; }}
-  #variant-light svg path.z {{ fill: #d8d8d8;
-    transition: fill 30ms linear, filter 30ms linear; }}
+  /* Default (off) — dim shade; JS replaces fill+filter when zone is on.
+     No CSS transition: the source modulates at ~60 Hz, so a 30ms transition
+     would low-pass-filter (smear) fast changes into mush, and animating the
+     drop-shadow re-rasterizes the blur on every frame it's mid-transition
+     (i.e. constantly). We track the source 1:1 and let the rAF loop pace it. */
+  #variant-dark  svg path.z {{ fill: #262626; }}
+  #variant-light svg path.z {{ fill: #d8d8d8; }}
 {THEME_CSS}
 </style></head>
 <body>
@@ -270,28 +307,62 @@ def render_html_phone2() -> str:
     }};
   }}
 
-  function applyTo(byZoneMap, styleFn, zones) {{
-    for (const [z, plist] of byZoneMap) {{
+  // --- Render --------------------------------------------------------------
+  // Paint each frame as it arrives over SSE. The server only ever holds the
+  // newest frame (see Subscriber), so a momentarily-slow client coalesces to
+  // the latest instead of replaying a stale backlog. We render in the message
+  // handler — NOT on requestAnimationFrame — because rAF is throttled/paused
+  // when the window is unfocused or occluded (it sits next to the scrcpy
+  // mirror), which made the glyph window look frozen. Each paint is cheap:
+  // only the visible theme variant, and only zones whose quantised brightness
+  // changed (no CSS transition, so changes are instant, not smeared).
+  function effectiveDark() {{
+    const t = _html.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    // Auto (no manual theme): the CSS shows the dark-bodied variant on a
+    // black page regardless of system appearance, so paint the dark variant
+    // to match. Following darkMQ here would paint the hidden light variant on
+    // a light-mode host, leaving the visible dark phone permanently unlit.
+    return true;
+  }}
+
+  const applied = new WeakMap();   // path -> last brightness bucket painted
+  function paint(map, styleFn, zones, force) {{
+    for (const [z, plist] of map) {{
       const v = Math.max(0, Math.min(1, +zones[z] || 0));
-      const s = styleFn(v);
+      const key = Math.round(v * 64);          // 65 buckets: stable + cheap
       for (const p of plist) {{
+        if (!force && applied.get(p) === key) continue;
+        applied.set(p, key);
+        const s = styleFn(v);
         p.style.fill = s.fill;
         p.style.filter = s.filter;
       }}
     }}
   }}
 
-  function connect() {{
-    const es = new EventSource('/events');
-    es.onmessage = ev => {{
-      try {{
-        const zones = (JSON.parse(ev.data).zones) || [];
-        applyTo(byZoneDark,  styleForDark,  zones);
-        applyTo(byZoneLight, styleForLight, zones);
-      }} catch (e) {{}}
-    }};
+  let latestZones = [];
+  let lastDark = null;
+  function render(force) {{
+    const dark = effectiveDark();
+    if (dark !== lastDark) {{ force = true; lastDark = dark; }}
+    paint(dark ? byZoneDark : byZoneLight,
+          dark ? styleForDark : styleForLight,
+          latestZones, force);
   }}
-  connect();
+
+  const es = new EventSource('/events');
+  es.onmessage = ev => {{
+    try {{ latestZones = JSON.parse(ev.data).zones || []; render(false); }}
+    catch (e) {{}}
+  }};
+  // Re-paint when the effective theme flips (system preference or the manual
+  // triple-click gesture, which toggles data-theme on <html>).
+  darkMQ.addEventListener('change', () => render(true));
+  new MutationObserver(() => render(true))
+    .observe(_html, {{ attributes: true, attributeFilter: ['data-theme'] }});
+  render(true);   // initial off-state
 </script>
 </body></html>
 """
@@ -353,9 +424,9 @@ def render_html_phone4apro() -> str:
   :root[data-theme="dark"]  #variant-light {{ display: none; }}
   :root[data-theme="dark"]  #variant-dark  {{ display: block; }}
   /* Per-diamond styling. Off state is the SVG's intrinsic #1C1C1C; JS sets
-     inline fill+filter when a dot is lit. */
-  #variant-dark  svg path.z {{ transition: fill 30ms linear, filter 30ms linear; }}
-  #variant-light svg path.z {{ transition: fill 30ms linear, filter 30ms linear; }}
+     inline fill+filter when a dot is lit. No CSS transition — see the Phone (2)
+     note: at ~60 Hz it smears fast changes and re-rasterizes the blur every
+     frame. The rAF loop paces updates instead. */
 {THEME_CSS}
 </style></head>
 <body>
@@ -406,28 +477,58 @@ def render_html_phone4apro() -> str:
     }};
   }}
 
-  function applyTo(byIdxMap, styleFn, zones) {{
-    for (const [i, plist] of byIdxMap) {{
+  // --- Render --------------------------------------------------------------
+  // Same approach as Phone (2): paint each frame in the SSE message handler
+  // (NOT on requestAnimationFrame, which is paused when the window is occluded
+  // — that froze the mirror). Only the visible theme variant, and only dots
+  // whose quantised brightness changed. With 137 dots the skip is what keeps
+  // each paint cheap.
+  const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+  function effectiveDark() {{
+    const t = _html.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    // Auto (no manual theme): the CSS shows the dark-bodied variant on a
+    // black page regardless of system appearance, so paint the dark variant
+    // to match. Following darkMQ here would paint the hidden light variant on
+    // a light-mode host, leaving the visible dark phone permanently unlit.
+    return true;
+  }}
+
+  const applied = new WeakMap();   // path -> last brightness bucket painted
+  function paint(map, styleFn, zones, force) {{
+    for (const [i, plist] of map) {{
       const v = Math.max(0, Math.min(1, +zones[i] || 0));
-      const s = styleFn(v);
+      const key = Math.round(v * 64);
       for (const p of plist) {{
+        if (!force && applied.get(p) === key) continue;
+        applied.set(p, key);
+        const s = styleFn(v);
         p.style.fill = s.fill;
         p.style.filter = s.filter;
       }}
     }}
   }}
 
-  function connect() {{
-    const es = new EventSource('/events');
-    es.onmessage = ev => {{
-      try {{
-        const zones = (JSON.parse(ev.data).zones) || [];
-        applyTo(byIdxDark,  styleForDark,  zones);
-        applyTo(byIdxLight, styleForLight, zones);
-      }} catch (e) {{}}
-    }};
+  let latestZones = [];
+  let lastDark = null;
+  function render(force) {{
+    const dark = effectiveDark();
+    if (dark !== lastDark) {{ force = true; lastDark = dark; }}
+    paint(dark ? byIdxDark : byIdxLight,
+          dark ? styleForDark : styleForLight,
+          latestZones, force);
   }}
-  connect();
+
+  const es = new EventSource('/events');
+  es.onmessage = ev => {{
+    try {{ latestZones = JSON.parse(ev.data).zones || []; render(false); }}
+    catch (e) {{}}
+  }};
+  darkMQ.addEventListener('change', () => render(true));
+  new MutationObserver(() => render(true))
+    .observe(_html, {{ attributes: true, attributeFilter: ['data-theme'] }});
+  render(true);   // initial off-state
 </script>
 </body></html>
 """
@@ -435,43 +536,70 @@ def render_html_phone4apro() -> str:
 
 # ---------- SSE broadcaster ----------------------------------------------------
 
+class Subscriber:
+    """Single-slot latest-frame mailbox for one SSE client.
+
+    The glyph source runs at ~60 Hz with nearly every frame changing. If a
+    client (browser tab) momentarily falls behind, replaying a queued backlog
+    would only ever show stale LED states. So we keep just the *newest* frame:
+    push() overwrites, get() returns it once. A slow client therefore skips
+    intermediate frames and snaps to the current state — exactly right for a
+    realtime mirror, and it means a slow client can never back-pressure the
+    logcat reader or build an unbounded queue."""
+
+    __slots__ = ("_cond", "_latest", "_pending")
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._latest: Optional[bytes] = None
+        self._pending = False
+
+    def put(self, payload: bytes) -> None:
+        with self._cond:
+            self._latest = payload      # coalesce: newest wins
+            self._pending = True
+            self._cond.notify()
+
+    def get(self, timeout: float) -> Optional[bytes]:
+        """Block until a frame is available, returning it; or return None if
+        `timeout` elapses first (the caller then sends an SSE keepalive)."""
+        with self._cond:
+            if not self._pending:
+                self._cond.wait(timeout)
+            if not self._pending:
+                return None
+            self._pending = False
+            return self._latest
+
+
 class Broadcaster:
     """Thread-safe fan-out: every push() goes to every connected SSE client."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.subscribers: list[Queue] = []
+        self.subscribers: list[Subscriber] = []
         self.last: Optional[bytes] = None
 
-    def subscribe(self) -> Queue:
-        q: Queue = Queue(maxsize=64)
+    def subscribe(self) -> Subscriber:
+        s = Subscriber()
         with self.lock:
-            self.subscribers.append(q)
+            self.subscribers.append(s)
             if self.last is not None:
-                q.put_nowait(self.last)
-        return q
+                s.put(self.last)
+        return s
 
-    def unsubscribe(self, q: Queue) -> None:
+    def unsubscribe(self, s: Subscriber) -> None:
         with self.lock:
             try:
-                self.subscribers.remove(q)
+                self.subscribers.remove(s)
             except ValueError:
                 pass
 
     def push(self, payload_json: bytes) -> None:
         with self.lock:
             self.last = payload_json
-            dead = []
-            for q in self.subscribers:
-                try:
-                    q.put_nowait(payload_json)
-                except Exception:
-                    dead.append(q)
-            for q in dead:
-                try:
-                    self.subscribers.remove(q)
-                except ValueError:
-                    pass
+            for s in self.subscribers:
+                s.put(payload_json)
 
 
 # ---------- HTTP server --------------------------------------------------------
@@ -496,23 +624,23 @@ def make_handler(html: str, broadcaster: Broadcaster):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
-                q = broadcaster.subscribe()
+                sub = broadcaster.subscribe()
                 try:
                     while True:
-                        try:
-                            payload = q.get(timeout=15)
+                        payload = sub.get(timeout=15)
+                        if payload is None:
+                            # keepalive comment
+                            self.wfile.write(b": ping\n\n")
+                            self.wfile.flush()
+                        else:
                             self.wfile.write(b"data: ")
                             self.wfile.write(payload)
                             self.wfile.write(b"\n\n")
                             self.wfile.flush()
-                        except Empty:
-                            # keepalive comment
-                            self.wfile.write(b": ping\n\n")
-                            self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 finally:
-                    broadcaster.unsubscribe(q)
+                    broadcaster.unsubscribe(sub)
                 return
             self.send_response(404)
             self.end_headers()
@@ -568,10 +696,19 @@ class Profile:
     log_reader: "callable | None"
 
 
-def _make_log_reader(expected_frame_size: int):
-    """Build a reader that tails logcat and emits frames of exactly the given
-    size as {zones:[...0..1...], ts:<ms>} JSON. Other-sized frames are ignored
-    (the device may emit multiple lights in parallel)."""
+def _make_log_reader(native_size: int,
+                     expanders: "dict[int, callable] | None" = None):
+    """Build a reader that tails logcat and emits {zones:[...0..1...], ts:<ms>}
+    JSON frames of `native_size` length.
+
+    `native_size` frames are used as-is. `expanders` maps any *other* accepted
+    frame size to a function that expands that frame to `native_size` (e.g. a
+    5-channel glyph-group frame → 33 zones on Phone (2)). Frames whose size is
+    neither native nor in `expanders` are ignored (the device may drive several
+    independent lights in parallel)."""
+    expanders = expanders or {}
+    accepted = {native_size, *expanders}
+
     def _reader(sidecar: Sidecar, broadcaster: "Broadcaster",
                 stop: threading.Event) -> None:
         while not stop.is_set():
@@ -592,14 +729,17 @@ def _make_log_reader(expected_frame_size: int):
                     if not m:
                         continue
                     n_logged = int(m.group(1))
-                    if n_logged != expected_frame_size:
+                    if n_logged not in accepted:
                         continue
                     try:
-                        vals = [int(x) for x in m.group(2).split(",")]
+                        vals = [int(x) for x in m.group(2).split(",")
+                                if x.strip() != ""]
                     except ValueError:
                         continue
-                    if len(vals) != expected_frame_size:
+                    if len(vals) != n_logged:
                         continue
+                    if n_logged != native_size:
+                        vals = expanders[n_logged](vals)   # → native_size
                     m_local = max(vals)
                     if m_local > max_seen:
                         max_seen = m_local
@@ -624,7 +764,9 @@ def _make_log_reader(expected_frame_size: int):
 
 
 PROFILES: dict[str, Profile] = {
-    "A065":  Profile("Phone (2)",      render_html_phone2,      _make_log_reader(PHONE2_FRAME_SIZE)),
+    "A065":  Profile("Phone (2)",      render_html_phone2,
+                     _make_log_reader(PHONE2_FRAME_SIZE,
+                                      {PHONE2_GROUP_FRAME_SIZE: _expand_phone2_groups})),
     "A069P": Profile("Phone (4a) Pro", render_html_phone4apro,  _make_log_reader(PHONE4APRO_FRAME_SIZE)),
 }
 
@@ -638,33 +780,59 @@ def pick_profile(model: str) -> Profile:
     return PROFILES["A065"]
 
 
-def open_app_window(url: str) -> None:
+PROFILE_DIR_PREFIX = "/tmp/glyph-mirror-"
+
+
+def _cleanup_stale_profiles() -> None:
+    """Reap throwaway Chrome profiles left by sessions that were killed before
+    their own cleanup ran. Each dir ends in `-<pid>`; we only remove ones whose
+    pid is dead, so a concurrently-running sidecar's window is never disturbed."""
+    for path in glob.glob(PROFILE_DIR_PREFIX + "*"):
+        try:
+            pid = int(path.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)            # alive → leave it
+        except ProcessLookupError:
+            shutil.rmtree(path, ignore_errors=True)   # dead → reap
+        except OSError:
+            continue                   # exists but not ours → leave it
+
+
+def open_app_window(url: str):
     """Open `url` in a chromeless app-mode window if a Chromium browser is
-    installed, otherwise fall back to the system default browser."""
+    installed, otherwise fall back to the system default browser.
+
+    Returns `(browser_proc, profile_dir)` for the app-mode window so the caller
+    can close the window and remove its throwaway profile on exit; both are
+    None when we fell back to the default browser."""
     chromium_paths = [
         ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-         "google-chrome"),
+         "google-chrome", "Google Chrome"),
         ("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-         "brave"),
+         "brave", "Brave Browser"),
         ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-         "edge"),
-        ("/Applications/Arc.app/Contents/MacOS/Arc", "arc"),
+         "edge", "Microsoft Edge"),
+        ("/Applications/Arc.app/Contents/MacOS/Arc", "arc", "Arc"),
     ]
     bin_path = None
     label = ""
+    app_name = ""
     if sys.platform == "darwin":
-        for p, lab in chromium_paths:
+        for p, lab, app in chromium_paths:
             if os.path.exists(p):
                 bin_path = p
                 label = lab
+                app_name = app
                 break
     if bin_path:
         # Use a dedicated --user-data-dir so the window is independent of the
         # user's normal Chrome session (which may already be running with the
         # default profile, making --app= a no-op).
-        profile = f"/tmp/glyph-mirror-{label}-{os.getpid()}"
+        profile = f"{PROFILE_DIR_PREFIX}{label}-{os.getpid()}"
         try:
-            subprocess.Popen([
+            proc = subprocess.Popen([
                 bin_path,
                 f"--app={url}",
                 f"--user-data-dir={profile}",
@@ -672,7 +840,14 @@ def open_app_window(url: str) -> None:
                 "--no-first-run",
                 "--no-default-browser-check",
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return
+            # The app-mode window often opens *behind* the scrcpy mirror. Pull
+            # the browser to the front so the glyph viewer is actually visible.
+            if app_name:
+                subprocess.Popen(
+                    ["osascript", "-e",
+                     f'tell application "{app_name}" to activate'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return proc, profile
         except Exception as e:
             print(f"glyph_sidecar: app-mode launch failed ({e}), "
                   "falling back to default browser.", file=sys.stderr)
@@ -683,6 +858,7 @@ def open_app_window(url: str) -> None:
             subprocess.Popen(["xdg-open", url])
     except Exception:
         pass
+    return None, None
 
 
 # ---------- entry point -------------------------------------------------------
@@ -692,6 +868,10 @@ def main() -> int:
     ap.add_argument("--serial", default="")
     ap.add_argument("--http-port", type=int, default=HTTP_PORT_DEFAULT)
     args = ap.parse_args()
+
+    # Reap throwaway Chrome profiles left behind by sessions that were killed
+    # before they could clean up (a clean exit removes its own dir below).
+    _cleanup_stale_profiles()
 
     sidecar = Sidecar(serial=args.serial)
     model = sidecar.detect_model()
@@ -709,6 +889,13 @@ def main() -> int:
     print(f"glyph_sidecar: serving {url}", file=sys.stderr)
 
     stop = threading.Event()
+    # scrcpy stops us with SIGTERM (see glyph_sidecar.c). Translate it into the
+    # stop event so the `finally` below runs — closing the browser window and
+    # removing its throwaway profile — instead of the process dying mid-block.
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    except Exception:
+        pass
     if profile.log_reader is not None:
         t_phone = threading.Thread(target=profile.log_reader,
                                    args=(sidecar, broadcaster, stop), daemon=True)
@@ -719,7 +906,7 @@ def main() -> int:
     # Prefer a chromeless app-mode window (Chrome / Brave / Edge / Arc) so the
     # viewer feels like a native window alongside the scrcpy mirror. Fall back
     # to the default browser if no Chromium-family browser is installed.
-    open_app_window(url)
+    browser_proc, browser_profile = open_app_window(url)
 
     try:
         # Block until SIGTERM/SIGINT.
@@ -730,6 +917,16 @@ def main() -> int:
     finally:
         stop.set()
         server.shutdown()
+        # Tear down the app-mode window and its throwaway profile so closing
+        # scrcpy leaves nothing behind.
+        if browser_proc is not None:
+            try:
+                browser_proc.terminate()
+                browser_proc.wait(timeout=2)
+            except Exception:
+                pass
+        if browser_profile:
+            shutil.rmtree(browser_profile, ignore_errors=True)
     return 0
 
 
