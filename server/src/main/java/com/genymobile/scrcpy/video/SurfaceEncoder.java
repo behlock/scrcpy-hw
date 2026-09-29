@@ -45,6 +45,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final float maxFps;
     private final boolean downsizeOnError;
     private final int minSizeAlignment;
+    private final boolean ignoreVideoEncoderConstraints;
 
     private boolean firstFrameSent;
     private int consecutiveErrors;
@@ -53,6 +54,8 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final AtomicBoolean stopped = new AtomicBoolean();
 
     private final CaptureControl captureControl = new CaptureControl();
+
+    private VideoConstraints videoConstraints;
 
     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
         this.capture = capture;
@@ -64,30 +67,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         this.encoderName = options.getVideoEncoder();
         this.downsizeOnError = options.getDownsizeOnError();
         this.minSizeAlignment = options.getMinSizeAlignment();
-    }
-
-    private static VideoConstraints createVideoConstraints(int maxSize, int minSizeAlignment, MediaCodecInfo.VideoCapabilities caps) {
-        assert caps != null;
-        int alignment = Math.max(caps.getWidthAlignment(), caps.getHeightAlignment());
-        Ln.d("Video codec size alignment requirement: " + alignment + "px");
-        if (alignment < minSizeAlignment) {
-            alignment = minSizeAlignment;
-            Ln.d("Actual video size alignment: " + alignment + "px");
-        }
-
-        int maxLandscapeWidth = caps.getSupportedWidths().getUpper();
-        int maxLandscapeHeight = caps.getSupportedHeightsFor(maxLandscapeWidth).getUpper();
-        Size maxLandscapeSize = new Size(maxLandscapeWidth, maxLandscapeHeight);
-
-        int maxPortraitHeight = caps.getSupportedHeights().getUpper();
-        int maxPortraitWidth = caps.getSupportedWidthsFor(maxPortraitHeight).getUpper();
-        Size maxPortraitSize = new Size(maxPortraitWidth, maxPortraitHeight);
-
-        int minWidth = caps.getSupportedWidths().getLower();
-        int minHeight = caps.getSupportedHeights().getLower();
-        int minSize = Math.max(minWidth, minHeight);
-
-        return new VideoConstraints(maxSize, alignment, maxLandscapeSize, maxPortraitSize, minSize);
+        this.ignoreVideoEncoderConstraints = options.getIgnoreVideoEncoderConstraints();
     }
 
     private void streamCapture() throws IOException, ConfigurationException {
@@ -95,11 +75,26 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
         MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
 
-        MediaCodecInfo.VideoCapabilities caps = mediaCodec.getCodecInfo().getCapabilitiesForType(codec.getMimeType()).getVideoCapabilities();
-        assert caps != null; // caps cannot be null for a video codec
-        VideoConstraints constraints = createVideoConstraints(maxSize, minSizeAlignment, caps);
+        MediaCodecInfo.VideoCapabilities caps;
+        int alignment;
+        if (ignoreVideoEncoderConstraints) {
+            caps = null;
+            alignment = 1;
+        } else {
+            caps = mediaCodec.getCodecInfo().getCapabilitiesForType(codec.getMimeType()).getVideoCapabilities();
+            assert caps != null; // caps cannot be null for a video codec
+            alignment = Math.max(caps.getWidthAlignment(), caps.getHeightAlignment());
+            Ln.d("Video codec size alignment requirement: " + alignment + "px");
+        }
+        if (alignment < minSizeAlignment) {
+            alignment = minSizeAlignment;
+            Ln.d("Actual video size alignment: " + alignment + "px");
+        }
 
-        capture.init(captureControl, constraints);
+        // Do not constrain by the declared video encoder capabilities before encoding actually fails
+        videoConstraints = new VideoConstraints(maxSize, alignment, null);
+
+        capture.init(captureControl, videoConstraints);
 
         try {
             boolean alive;
@@ -163,7 +158,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                         throw e;
                     }
                     Ln.e("Capture/encoding error: " + e.getClass().getName() + ": " + e.getMessage());
-                    if (!prepareRetry(constraints, size)) {
+                    if (!prepareRetry(caps, size)) {
                         throw e;
                     }
                     // Keep the current resetReasons flags for the retry
@@ -193,17 +188,14 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
     }
 
-    private boolean prepareRetry(VideoConstraints videoConstraints, Size currentSize) {
+    private boolean prepareRetry(MediaCodecInfo.VideoCapabilities caps, Size currentSize) {
         if (firstFrameSent) {
             ++consecutiveErrors;
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                // Definitively fail
-                return false;
+            if (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
+                // Wait a bit to increase the probability that retrying will fix the problem
+                SystemClock.sleep(50);
+                return true;
             }
-
-            // Wait a bit to increase the probability that retrying will fix the problem
-            SystemClock.sleep(50);
-            return true;
         }
 
         if (!downsizeOnError) {
@@ -211,7 +203,23 @@ public class SurfaceEncoder implements AsyncProcessor {
             return false;
         }
 
-        // Downsizing on error is only enabled if an encoding failure occurs before the first frame (downsizing later could be surprising)
+        if (caps != null && videoConstraints.getEncoderCapabilities() == null) {
+            assert !ignoreVideoEncoderConstraints : "caps != null implies !ignoreVideoEncoderConstraints";
+            Ln.i("Applying video encoder constraints");
+            videoConstraints = videoConstraints.withCapabilities(caps);
+            boolean accepted = capture.applyNewVideoConstraints(videoConstraints);
+            if (accepted) {
+                return true;
+            }
+        }
+
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            // Definitively fail
+            return false;
+        }
+
+        // Downsizing on error is only enabled if an encoding failure occurs before the first frame, or if the video constraints were not applied
+        // (downsizing later could be surprising)
 
         int newMaxSize = chooseMaxSizeFallback(currentSize);
         if (newMaxSize == 0) {

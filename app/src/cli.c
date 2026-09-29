@@ -112,6 +112,8 @@ enum {
     OPT_RENDER_FIT,
     OPT_WEB_SHARE,
     OPT_GLYPH,
+    OPT_IGNORE_VIDEO_ENCODER_CONSTRAINTS,
+    OPT_NO_TERMINAL_TITLE,
 };
 
 struct sc_option {
@@ -432,6 +434,13 @@ static const struct sc_option options[] = {
         .text = "Print this help.",
     },
     {
+        .longopt_id = OPT_IGNORE_VIDEO_ENCODER_CONSTRAINTS,
+        .longopt = "ignore-video-encoder-constraints",
+        .text = "Do not consider video encoder capabilities.\n"
+                "This is useful if the reported capabilities are incorrect.\n"
+                "It may help to force a value for --min-size-alignment.",
+    },
+    {
         .shortopt = 'K',
         .text = "Same as --keyboard=uhid, or --keyboard=aoa if --otg is set.",
     },
@@ -666,6 +675,11 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_NO_POWER_ON,
         .longopt = "no-power-on",
         .text = "Do not power on the device on start.",
+    },
+    {
+        .longopt_id = OPT_NO_TERMINAL_TITLE,
+        .longopt = "no-terminal-title",
+        .text = "Disable terminal title updates.",
     },
     {
         .longopt_id = OPT_NO_VD_DESTROY_CONTENT,
@@ -976,7 +990,7 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_VIDEO_CODEC,
         .longopt = "video-codec",
         .argdesc = "name",
-        .text = "Select a video codec (h264, h265 or av1).\n"
+        .text = "Select a video codec (h264, h265, av1, vp8 or vp9).\n"
                 "Default is h264.",
     },
     {
@@ -2049,7 +2063,15 @@ parse_video_codec(const char *optarg, enum sc_codec *codec) {
         *codec = SC_CODEC_AV1;
         return true;
     }
-    LOGE("Unsupported video codec: %s (expected h264, h265 or av1)", optarg);
+    if (!strcmp(optarg, "vp8")) {
+        *codec = SC_CODEC_VP8;
+        return true;
+    }
+    if (!strcmp(optarg, "vp9")) {
+        *codec = SC_CODEC_VP9;
+        return true;
+    }
+    LOGE("Unsupported video codec: %s (expected h264, h265, av1, vp8 or vp9)", optarg);
     return false;
 }
 
@@ -2968,6 +2990,12 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case 'x':
                 opts->flex_display = true;
                 break;
+            case OPT_IGNORE_VIDEO_ENCODER_CONSTRAINTS:
+                opts->ignore_video_encoder_constraints = true;
+                break;
+            case OPT_NO_TERMINAL_TITLE:
+                opts->update_terminal_title = false;
+                break;
             default:
                 // getopt prints the error message on stderr
                 return false;
@@ -3414,6 +3442,12 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
              opts->record_format == SC_RECORD_FORMAT_M4A)
                 && opts->audio_codec == SC_CODEC_RAW) {
             LOGE("Recording to MP4 container does not support RAW audio");
+            return false;
+        }
+
+        if (opts->record_format == SC_RECORD_FORMAT_MP4
+                && opts->video_codec == SC_CODEC_VP8) {
+            LOGE("Recording to MP4 container does not support VP8 video");
             return false;
         }
     }

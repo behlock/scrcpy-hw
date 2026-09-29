@@ -17,7 +17,6 @@
 #include "audio_player.h"
 #include "controller.h"
 #include "decoder.h"
-#include "delay_buffer.h"
 #include "demuxer.h"
 #include "events.h"
 #include "file_pusher.h"
@@ -40,6 +39,8 @@
 #include "util/acksync.h"
 #include "util/log.h"
 #include "util/rand.h"
+#include "util/str.h"
+#include "util/term.h"
 #include "util/timeout.h"
 #include "util/tick.h"
 #ifdef HAVE_V4L2
@@ -49,6 +50,7 @@
 # include "webshare/web_share.h"
 #endif
 #include "glyph_sidecar.h"
+#include "video_regulator.h"
 
 struct scrcpy {
     struct sc_server server;
@@ -59,10 +61,10 @@ struct scrcpy {
     struct sc_decoder video_decoder;
     struct sc_decoder audio_decoder;
     struct sc_recorder recorder;
-    struct sc_delay_buffer video_buffer;
+    struct sc_video_regulator video_regulator;
 #ifdef HAVE_V4L2
     struct sc_v4l2_sink v4l2_sink;
-    struct sc_delay_buffer v4l2_buffer;
+    struct sc_video_regulator v4l2_regulator;
 #endif
 #ifdef HAVE_WEBSHARE
     struct sc_web_share web_share;
@@ -303,10 +305,23 @@ init_sdl_gamepads(void) {
         if (SDL_IsGamepad(joystick)) {
             SDL_Event event;
             event.gdevice.type = SDL_EVENT_GAMEPAD_ADDED;
-            event.gdevice.which = i;
+            event.gdevice.which = joystick;
             SDL_PushEvent(&event);
         }
     }
+
+    SDL_free(joysticks);
+}
+
+static void
+set_terminal_title_with_prefix(const char *value) {
+    char title[128];
+    memcpy(title, "scrcpy - ", 9);
+    size_t trunc_len = sc_str_utf8_truncation_index(value, 128 - 9 - 1);
+    assert(trunc_len <= 128 - 9 - 1);
+    memcpy(&title[9], value, trunc_len);
+    title[9 + trunc_len] = '\0';
+    sc_term_set_title(title);
 }
 
 enum scrcpy_exit_code
@@ -416,6 +431,8 @@ scrcpy(struct scrcpy_options *options) {
         .vd_system_decorations = options->vd_system_decorations,
         .keep_active = options->keep_active,
         .flex_display = options->flex_display,
+        .ignore_video_encoder_constraints =
+            options->ignore_video_encoder_constraints,
         .list = options->list,
     };
 
@@ -502,13 +519,21 @@ scrcpy(struct scrcpy_options *options) {
     // It is necessarily initialized here, since the device is connected
     struct sc_server_info *info = &s->server.info;
 
+    const char *window_title =
+        options->window_title ? options->window_title : info->device_name;
+    assert(window_title);
+
+    if (options->update_terminal_title) {
+        set_terminal_title_with_prefix(window_title);
+    }
+
     const char *serial = s->server.serial;
     assert(serial);
 
     struct sc_file_pusher *fp = NULL;
 
     if (options->window && options->control) {
-        if (!sc_file_pusher_init(&s->file_pusher, serial,
+        if (!sc_file_pusher_init(&s->file_pusher, &s->controller, serial,
                                  options->push_target)) {
             goto end;
         }
@@ -775,9 +800,6 @@ aoa_complete:
     assert(options->control == !!controller);
 
     if (options->window) {
-        const char *window_title =
-            options->window_title ? options->window_title : info->device_name;
-
         struct sc_screen_params screen_params = {
             .video = options->video_playback,
             .camera = options->video_source == SC_VIDEO_SOURCE_CAMERA,
@@ -815,10 +837,10 @@ aoa_complete:
         if (options->video_playback) {
             struct sc_frame_source *src = &s->video_decoder.frame_source;
             if (options->video_buffer) {
-                sc_delay_buffer_init(&s->video_buffer,
-                                     options->video_buffer, true);
-                sc_frame_source_add_sink(src, &s->video_buffer.frame_sink);
-                src = &s->video_buffer.frame_source;
+                sc_video_regulator_init(&s->video_regulator,
+                                        options->video_buffer, true);
+                sc_frame_source_add_sink(src, &s->video_regulator.frame_sink);
+                src = &s->video_regulator.frame_source;
             }
 
             sc_frame_source_add_sink(src, &s->screen.frame_sink);
@@ -840,9 +862,10 @@ aoa_complete:
 
         struct sc_frame_source *src = &s->video_decoder.frame_source;
         if (options->v4l2_buffer) {
-            sc_delay_buffer_init(&s->v4l2_buffer, options->v4l2_buffer, true);
-            sc_frame_source_add_sink(src, &s->v4l2_buffer.frame_sink);
-            src = &s->v4l2_buffer.frame_source;
+            sc_video_regulator_init(&s->v4l2_regulator, options->v4l2_buffer,
+                                    true);
+            sc_frame_source_add_sink(src, &s->v4l2_regulator.frame_sink);
+            src = &s->v4l2_regulator.frame_source;
         }
 
         sc_frame_source_add_sink(src, &s->v4l2_sink.frame_sink);

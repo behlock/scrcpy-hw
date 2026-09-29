@@ -356,6 +356,8 @@ Valid codec ids for _video_ streams are:
  - `"h264"` (`0x68323634`)
  - `"h265"` (`0x68323635`)
  - `"av1"` (`0x00617631`)
+ - `"vp8"` (`0x00767038`)
+ - `"vp9"` (`0x00767039`)
 
 Valid codec ids for _audio_ streams are:
  - `"opus"` (`0x6F707573`)
@@ -368,7 +370,7 @@ session (a session changes when the device rotates):
 
 ```
      byte 0   byte 1   byte 2   byte 3
-    10000000 00000000 00000000 0000000.
+    10000000 00000000 00000000 0000000R
     ^<------------------------------->^
     |               padding           |
      `- session packet flag            `- client resized flag

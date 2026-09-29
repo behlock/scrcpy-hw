@@ -3,9 +3,9 @@ set -ex
 . $(dirname ${BASH_SOURCE[0]})/_init
 process_args "$@"
 
-VERSION=8.1.1
+VERSION=8.1.2
 URL="https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz"
-SHA256SUM=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
+SHA256SUM=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
 
 PROJECT_DIR="ffmpeg-$VERSION"
 FILENAME="$PROJECT_DIR.tar.xz"
@@ -63,6 +63,8 @@ else
         --enable-decoder=h264
         --enable-decoder=hevc
         --enable-decoder=av1
+        --enable-decoder=vp8
+        --enable-decoder=vp9
         --enable-decoder=libdav1d
         --enable-decoder=pcm_s16le
         --enable-decoder=opus

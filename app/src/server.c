@@ -111,6 +111,10 @@ sc_server_get_codec_name(enum sc_codec codec) {
             return "h265";
         case SC_CODEC_AV1:
             return "av1";
+        case SC_CODEC_VP8:
+            return "vp8";
+        case SC_CODEC_VP9:
+            return "vp9";
         case SC_CODEC_OPUS:
             return "opus";
         case SC_CODEC_AAC:
@@ -420,6 +424,9 @@ execute_server(struct sc_server *server,
     if (params->flex_display) {
         ADD_PARAM("flex_display=true");
     }
+    if (params->ignore_video_encoder_constraints) {
+        ADD_PARAM("ignore_video_encoder_constraints=true");
+    }
     if (params->display_ime_policy != SC_DISPLAY_IME_POLICY_UNDEFINED) {
         ADD_PARAM("display_ime_policy=%s",
             sc_server_get_display_ime_policy_name(params->display_ime_policy));
@@ -596,7 +603,8 @@ device_read_info(struct sc_intr *intr, sc_socket device_socket,
     }
     // in case the client sends garbage
     buf[SC_DEVICE_NAME_FIELD_LENGTH - 1] = '\0';
-    memcpy(info->device_name, (char *) buf, sizeof(info->device_name));
+    static_assert(sizeof(info->device_name) == SC_DEVICE_NAME_FIELD_LENGTH);
+    memcpy(info->device_name, buf, SC_DEVICE_NAME_FIELD_LENGTH);
 
     return true;
 }

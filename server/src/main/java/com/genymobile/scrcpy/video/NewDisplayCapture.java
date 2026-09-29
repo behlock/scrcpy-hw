@@ -355,9 +355,11 @@ public class NewDisplayCapture extends SurfaceCapture {
 
     private synchronized void triggerResize(Size size) {
         if (virtualDisplay != null) {
-            size = size.constrain(videoConstraints); // in case the constraints have changed
+            size = size.constrain(videoConstraints, false); // in case the constraints have changed
             int displayId = virtualDisplay.getDisplay().getDisplayId();
             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+            @SuppressWarnings("checkstyle:HiddenField") // hides this.dpi on purpose
+            int dpi = displayInfo.getDpi();
             int displayRotation = displayInfo.getRotation();
             if (captureOrientation.isSwap()) {
                 size = size.rotate();

@@ -401,18 +401,26 @@ sc_screen_frame_sink_open(struct sc_frame_sink *sink,
         return false;
     }
 
-    // content_size can be written from this thread, because it is never read
-    // from the main thread before handling SC_EVENT_OPEN_WINDOW (which acts as
-    // a synchronization point) when video is enabled
-    screen->frame_size.width = session->video.width;
-    screen->frame_size.height = session->video.height;
-    screen->content_size = get_oriented_size(screen->frame_size,
-                                             screen->orientation);
-
     screen->current_session = *session;
 
-    bool ok = sc_push_event(SC_EVENT_OPEN_WINDOW);
+    assert(session->video.width && session->video.height);
+    if (session->video.width > 0xFFFF || session->video.height > 0xFFFF) {
+        LOGE("Size too large: %" PRIu32 "x%" PRIu32, session->video.width,
+                                                     session->video.height);
+        return false;
+    }
+
+    struct sc_size *size = malloc(sizeof(*size));
+    if (!size) {
+        LOG_OOM();
+        return false;
+    }
+    size->width = session->video.width;
+    size->height = session->video.height;
+
+    bool ok = sc_push_event_with_data(SC_EVENT_OPEN_WINDOW, size);
     if (!ok) {
+        free(size);
         return false;
     }
 
@@ -811,14 +819,21 @@ sc_screen_destroy(struct sc_screen *screen) {
     sc_mutex_destroy(&screen->mutex);
 
     SDL_Event event;
-    int nevents = SDL_PeepEvents(&event, 1, SDL_GETEVENT,
-                                 SC_EVENT_DISCONNECTED_ICON_LOADED,
-                                 SC_EVENT_DISCONNECTED_ICON_LOADED);
-    if (nevents == 1) {
+    bool has_event =
+        sc_dequeue_event(SC_EVENT_DISCONNECTED_ICON_LOADED, &event);
+    if (has_event) {
         assert(event.type == SC_EVENT_DISCONNECTED_ICON_LOADED);
         // The event was posted, but not handled, the icon must be freed
         SDL_Surface *dangling_icon = event.user.data1;
         sc_icon_destroy(dangling_icon);
+    }
+
+    has_event = sc_dequeue_event(SC_EVENT_OPEN_WINDOW, &event);
+    if (has_event) {
+        assert(event.type == SC_EVENT_OPEN_WINDOW);
+        // The event was posted, but not handled, the size must be freed
+        struct sc_size * size = event.user.data1;
+        free(size);
     }
 }
 
@@ -906,6 +921,12 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
 
     AVFrame *frame = screen->frame;
     struct sc_size new_frame_size = {frame->width, frame->height};
+
+    if (!new_frame_size.width || !new_frame_size.height) {
+        LOGE("Invalid frame size: %" PRIu32 "x%" PRIu32,
+             new_frame_size.width, new_frame_size.height);
+        return false;
+    }
 
     if (screen->frame_size.width != new_frame_size.width
             || screen->frame_size.height != new_frame_size.height) {
@@ -1113,7 +1134,14 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     switch (event->type) {
-        case SC_EVENT_OPEN_WINDOW:
+        case SC_EVENT_OPEN_WINDOW: {
+            struct sc_size *size = event->user.data1;
+            assert(size);
+
+            screen->frame_size = *size;
+            free(size);
+            screen->content_size = get_oriented_size(screen->frame_size,
+                                                     screen->orientation);
             sc_screen_show_initial_window(screen);
 
             if (sc_screen_is_relative_mode(screen)) {
@@ -1123,6 +1151,7 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
 
             sc_screen_render(screen, false);
             return;
+        }
         case SC_EVENT_NEW_FRAME: {
             bool ok = sc_screen_update_frame(screen);
             if (!ok) {

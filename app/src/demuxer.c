@@ -21,6 +21,8 @@ sc_demuxer_to_avcodec_id(uint32_t codec_id) {
 #define SC_CODEC_ID_H264 UINT32_C(0x68323634) // "h264" in ASCII
 #define SC_CODEC_ID_H265 UINT32_C(0x68323635) // "h265" in ASCII
 #define SC_CODEC_ID_AV1 UINT32_C(0x00617631) // "av1" in ASCII
+#define SC_CODEC_ID_VP8 UINT32_C(0x00767038) // "vp8" in ASCII
+#define SC_CODEC_ID_VP9 UINT32_C(0x00767039) // "vp9" in ASCII
 #define SC_CODEC_ID_OPUS UINT32_C(0x6f707573) // "opus" in ASCII
 #define SC_CODEC_ID_AAC UINT32_C(0x00616163) // "aac" in ASCII
 #define SC_CODEC_ID_FLAC UINT32_C(0x666c6163) // "flac" in ASCII
@@ -37,6 +39,10 @@ sc_demuxer_to_avcodec_id(uint32_t codec_id) {
             LOGE("AV1 not supported by this FFmpeg version");
             return AV_CODEC_ID_NONE;
 #endif
+        case SC_CODEC_ID_VP8:
+            return AV_CODEC_ID_VP8;
+        case SC_CODEC_ID_VP9:
+            return AV_CODEC_ID_VP9;
         case SC_CODEC_ID_OPUS:
             return AV_CODEC_ID_OPUS;
         case SC_CODEC_ID_AAC:
@@ -76,7 +82,7 @@ sc_demuxer_recv_header(struct sc_demuxer *demuxer,
     // which only contains a 12-byte header:
     //
     //  byte 0   byte 1   byte 2   byte 3
-    // 10000000 00000000 00000000 0000000.
+    // 10000000 00000000 00000000 0000000R
     // ^<------------------------------->^
     // |               padding           |
     //  `- session packet flag            `- client resized flag
@@ -94,6 +100,8 @@ sc_demuxer_recv_header(struct sc_demuxer *demuxer,
     //  <-------------> <-----> <-----------------------------...
     //        PTS        packet        raw packet
     //                    size
+    //  <--------------------->
+    //       frame header
     //
     // The most significant bits of the PTS are used for packet flags:
     //
@@ -235,6 +243,12 @@ run_demuxer(void *data) {
 
         session = &session_data;
         sc_demuxer_parse_session(header, session);
+
+        if (!session_data.video.width || !session_data.video.height) {
+            LOGE("Invalid session video size: %" PRIu32 "x%" PRIu32,
+                 session_data.video.width, session_data.video.height);
+            goto finally_free_context;
+        }
 
         codec_ctx->width = session_data.video.width;
         codec_ctx->height = session_data.video.height;

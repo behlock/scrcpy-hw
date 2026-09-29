@@ -60,6 +60,8 @@ sc_texture_to_sdl_color_space(enum AVColorSpace color_space,
     switch (color_space) {
         case AVCOL_SPC_BT709:
         case AVCOL_SPC_RGB:
+        case AVCOL_SPC_UNSPECIFIED:
+        case AVCOL_SPC_YCGCO:
             return full_range ? SDL_COLORSPACE_BT709_FULL
                               : SDL_COLORSPACE_BT709_LIMITED;
         case AVCOL_SPC_BT470BG:
@@ -80,6 +82,9 @@ sc_texture_create_frame_texture(struct sc_texture *tex,
                                 struct sc_size size,
                                 enum AVColorSpace color_space,
                                 enum AVColorRange color_range) {
+    LOGV("Creating new texture: size=%" PRIu16 "x%" PRIu16 " color_space=%d "
+         "color_range=%d", size.width, size.height, color_space, color_range);
+
     SDL_PropertiesID props = SDL_CreateProperties();
     if (!props) {
         return NULL;
