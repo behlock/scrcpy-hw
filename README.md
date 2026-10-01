@@ -1,8 +1,4 @@
-> [!WARNING]
-> **[Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) is the only official
-source for scrcpy. This repository is an unofficial fork.**
-
-# scrcpy-hw (based on scrcpy v4.1)
+# scrcpy-hw
 
 <img src="app/data/scrcpy.svg" width="96" height="96" alt="scrcpy" align="right" />
 
