@@ -6,8 +6,6 @@ Personal fork of [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) that 
 
 Everything else from upstream still works exactly the same. The fork is opt-in at build time (`-Dwebshare=true`) and behind a single CLI flag (`--web-share`), so a build without it is byte-equivalent to upstream behaviour.
 
-Full design notes: [`doc/web-share.md`](doc/web-share.md).
-
 ## Usage
 
 ```bash
